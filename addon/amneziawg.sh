@@ -4080,6 +4080,8 @@ do_diag(){
     echo "  Go runtime tune (computed now): $(go_tune_desc)"
     grep -qiF 'out of memory' $DAEMON_LOG 2>/dev/null && \
         echo "  >>> last daemon exit was a Go runtime OUT-OF-MEMORY: heap hit the ceiling under load (box low on RAM for this throughput) <<<"
+    grep -qE 'unexpected fault address|fatal error: fault' $DAEMON_LOG 2>/dev/null && \
+        echo "  >>> last daemon exit was a FAULT (unexpected fault address / SIGSEGV in the Go runtime): a heap page the kernel refused to back — on a squeezed box (see memory envelope below) that is the same starvation as an OOM <<<"
     echo "--- runtime / network / TUN ---"
     echo "memory (free):"; free 2>/dev/null | sed 's/^/  /'
     # Free RAM is the WRONG lens under vm.overcommit_memory=2 — the budget that decides
@@ -4613,9 +4615,32 @@ launch_daemon(){
 # fatal-OOM prints — an intentional kill (SIGTERM/SIGKILL on stop/restart) never matches,
 # so this can't false-fire on a normal teardown.
 record_daemon_oom(){
+    # Envelope verdict (1.5.23) — appended to whichever branch fires, so the incident log
+    # says not just "it ran out of memory" but WHICH knob is already at its floor and what
+    # the user can still do about it. Empty on a box with room to breathe.
+    local _sq _adv=""
+    _sq=$(mem_squeeze_state)
+    case "${_sq%%|*}" in
+        floor) _adv=" — and this box's memory envelope is AT ITS FLOOR (strict vm.overcommit, no swap): the pool floor alone pins ~half of GOMEMLIMIT and the addon has no knob left; add a swap file on the USB (amtm) — it raises CommitLimit directly, which is what sets the ceiling here (freeing RAM barely moves it on a 512MB box)" ;;
+        tight) _adv=" — and this box's memory envelope is AT ITS FLOOR (strict vm.overcommit) even with swap present: free RAM (AiProtection / co-resident addons) or cut the load through the tunnel" ;;
+    esac
     if grep -qiF 'out of memory' $DAEMON_LOG 2>/dev/null; then
         # The Go runtime's OWN fatal-OOM (heap-commit refused). rc is typically 2.
-        awg_incident "amneziawg-go OOM-crashed (rc=${1:-?}) — Go heap hit its ceiling under load (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024}); box is low on RAM for this throughput"
+        awg_incident "amneziawg-go OOM-crashed (rc=${1:-?}) — Go heap hit its ceiling under load (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024}); box is low on RAM for this throughput${_adv}"
+    elif grep -qE 'unexpected fault address|fatal error: fault' $DAEMON_LOG 2>/dev/null; then
+        # SAME starvation, different death shape — and until 1.5.23 it was recorded as
+        # NOTHING, so a box dying this way looked like a mystery crash next to a pile of
+        # OOM incidents. The Go runtime prints "unexpected fault address" + "fatal error:
+        # fault" when a SIGSEGV lands somewhere it cannot attribute to a nil dereference;
+        # on a squeezed box that is a heap page the kernel refused to back, and the
+        # traceback points at the allocation itself (field: receive.go's
+        # `bufsArrs[i] = device.GetMessageBuffer()` — a fresh 64KB message buffer).
+        # Off a squeezed box the same string is NOT memory pressure, so don't claim it is.
+        if [ -n "$_sq" ]; then
+            awg_incident "amneziawg-go died on an unexpected fault address (rc=${1:-?}) — a heap page the kernel refused to back: the SAME memory starvation as an OOM abort, just a different death shape (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024})${_adv}"
+        else
+            awg_incident "amneziawg-go died on an unexpected fault address (rc=${1:-?}, SIGSEGV inside the Go runtime) — this box is NOT memory-squeezed (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024}), so keep /tmp/awg_daemon.log and report it"
+        fi
     elif [ "${1:-}" = 137 ] && dmesg 2>/dev/null | grep -iE 'killed process|out of memory' | grep -qi 'amneziawg-go'; then
         # rc=137 = 128+SIGKILL. That's ALSO how do_stop/do_start's `kill -9` fallback exits
         # the daemon, so rc alone must NOT be trusted — only record when the kernel log shows
