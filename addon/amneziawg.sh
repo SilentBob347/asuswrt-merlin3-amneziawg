@@ -4093,6 +4093,11 @@ do_diag(){
     _ca=$(awk '/^Committed_AS:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
     echo "vm.overcommit_memory : ${_oc:-?}$([ "${_oc:-}" = 2 ] && echo ' (STRICT accounting: the heap budget is CommitLimit - Committed_AS, NOT free RAM)')"
     echo "commit budget        : CommitLimit=${_cl:-?}MiB Committed_AS=${_ca:-?}MiB swap=$(swap_total_mib)MiB"
+    # Top consumers of the COMMIT budget (VmData), which is what the ceiling is cut from —
+    # eight lines, so a field diag answers "what is eating it" without a second round-trip.
+    # The full breakdown (RSS too, modules, Trend Micro switches) is the `mem` subcommand.
+    echo "top memory users (RSS KB / VmData KB — VmData is an upper bound, a Go daemon inflates it):"
+    awk '/^Name:/{n=$2} /^VmRSS:/{r=$2} /^VmData:/{printf "  %8d %8d  %s\n", r, $2, n}' /proc/[0-9]*/status 2>/dev/null | sort -rn | head -8
     _msq=$(mem_squeeze_state)
     [ -n "$_msq" ] && echo "  >>> MEMORY ENVELOPE AT ITS FLOOR ($_msq = state|GOMEMLIMIT MiB|pool cap|swap MiB) — the heap ceiling is pinned to the ${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB overcommit floor while the buffer-pool floor (512 x 64KB = 32MB) pins ~half of it; sustained load OOM-aborts the daemon and the watchdog restarts it (reads as 'the VPN drops now and then'). Both floors are liveness minimums — fix from the box side: swap file on the USB (amtm) and/or free RAM <<<"
     echo "amneziawg-go running : $(pidof amneziawg-go 2>/dev/null || echo no)"
@@ -4316,6 +4321,92 @@ arm_lan_deadman(){
         # already revived it) — avoids fighting an in-flight reload.
         pidof dnsmasq >/dev/null 2>&1 || service restart_dnsmasq >/dev/null 2>&1
     ) </dev/null >/dev/null 2>&1 &
+}
+
+# `mem` — who is eating what, split by the TWO budgets that actually decide whether the
+# daemon survives (1.5.23). They are NOT the same budget, and conflating them sends people
+# after the wrong knob — which is the whole reason this subcommand exists:
+#
+#   * PHYSICAL RAM (MemFree/MemAvailable, RSS, slab, kernel modules). This is what makes the
+#     box feel full and what makes small helpers die oddly (a field diag showed busybox grep
+#     taking SIGSEGV mid-apply, which silently zeroed that run's domain list).
+#   * COMMIT BUDGET (CommitLimit - Committed_AS). Under vm.overcommit_memory=2 this — not
+#     free RAM — is what compute_go_memlimit clamps GOMEMLIMIT against, so it is what pins a
+#     box to the 64MiB floor. CommitLimit = overcommit_ratio% x MemTotal + SwapTotal, so
+#     SWAP raises it directly while freeing RAM only lowers Committed_AS a little. Kernel
+#     modules (tdts/IDPfw — the Trend Micro engine behind AiProtection, Traffic Analyzer and
+#     Adaptive QoS) cost physical RAM but do NOT appear in Committed_AS at all: unloading
+#     them frees memory without lifting the ceiling one bit.
+#
+# Per-process numbers come from one awk pass over /proc/<pid>/status (VmData appears AFTER
+# VmRSS there, so a single forward scan has both by the time it prints). There is no
+# per-process Committed_AS in /proc, and VmData is only an UPPER BOUND on the contribution —
+# reserved-but-uncommitted address space counts in it, which the Go daemon has a lot of — so
+# the report reconciles the two totals out loud rather than implying they should match. Kernel threads have
+# neither line and drop out on their own. This is a MANUAL command, so the fork discipline
+# that governs the every-minute paths (see reap_stale_status) does not apply here.
+do_mem_report(){
+    local _oc _ratio _cl _ca _hr _msq
+    echo "================= AmneziaWG memory report ================="
+    echo "addon version    : $AWG_VERSION"
+    echo "date             : $(date)"
+    echo "model / firmware : $(nvram get productid 2>/dev/null) / $(nvram get buildno 2>/dev/null).$(nvram get extendno 2>/dev/null)"
+    echo "--- budgets ---"
+    awk '/^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SwapTotal|SwapFree|Slab|SReclaimable|SUnreclaim|CommitLimit|Committed_AS):/{printf "  %-16s %8.1f MB\n",$1,$2/1024}' /proc/meminfo 2>/dev/null
+    _oc=$(awk '{print $1; exit}' /proc/sys/vm/overcommit_memory 2>/dev/null)
+    _ratio=$(awk '{print $1; exit}' /proc/sys/vm/overcommit_ratio 2>/dev/null)
+    echo "  overcommit_memory ${_oc:-?} (ratio ${_ratio:-?})$([ "${_oc:-}" = 2 ] && echo ' — STRICT: the daemon ceiling follows CommitLimit - Committed_AS, NOT free RAM')"
+    _cl=$(awk '/^CommitLimit:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
+    _ca=$(awk '/^Committed_AS:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
+    case "$_cl$_ca" in ''|*[!0-9]*) : ;; *) _hr=$(( _cl - _ca )); echo "  commit headroom  $(printf '%8d' $_hr) MB  (CommitLimit - Committed_AS: the pool the daemon ceiling is cut from)" ;; esac
+    echo "--- what the addon does with that ---"
+    echo "  $(go_tune_desc)"
+    _msq=$(mem_squeeze_state)
+    if [ -n "$_msq" ]; then
+        echo "  >>> ENVELOPE AT ITS FLOOR ($_msq = state|GOMEMLIMIT MiB|pool cap|swap MiB) <<<"
+        # No clamp arithmetic duplicated here (go_tune_desc owns that) — just the input that
+        # would change, so the user can see whether swap is worth the USB writes.
+        case "$_cl$_ca" in ''|*[!0-9]*) : ;; *) echo "      a 1GB swap file would make CommitLimit ~$(( _cl + 1024 ))MB and the headroom ~$(( _hr + 1024 ))MB, which lifts the ceiling off its floor; freeing RAM only moves Committed_AS (${_ca}MB) and would have to get it under ~$(( _cl / 2 ))MB to do the same" ;; esac
+    fi
+    echo "--- processes: top 20 by RSS (Data = private writable VIRTUAL size, see the caveat below) ---"
+    printf '  %8s %8s  %s\n' "RSS KB" "Data KB" "process"
+    awk '/^Name:/{n=$2} /^VmRSS:/{r=$2} /^VmData:/{printf "%8d %8d  %s\n", r, $2, n}' /proc/[0-9]*/status 2>/dev/null \
+        | sort -rn | head -20 | sed 's/^/  /'
+    # VmData is an UPPER BOUND on a process's commit contribution, not the contribution
+    # itself: the Go runtime reserves a large heap-arena address range it never commits, so
+    # amneziawg-go can show hundreds of MB of Data against single-digit MB of RSS. Print the
+    # reconciliation instead of hiding it — Committed_AS is the authority, and a wide gap is
+    # normal on a box running a Go daemon, NOT a leak. (Caught by a field report, 1.5.23:
+    # sum(VmData)=689MB vs Committed_AS=253MB, all of the gap one amneziawg-go.)
+    awk -v ca="$_ca" '/^VmRSS:/{s+=$2} /^VmData:/{d+=$2; n++} END{
+            printf "  TOTAL: RSS %.1f MB, Data %.1f MB across %d processes\n", s/1024, d/1024, n
+            if (ca+0 > 0 && d/1024 > ca*1.3)
+                printf "  NB: Data totals %.1f MB against Committed_AS %d MB — the gap is address space\n      reserved but never committed (mostly the Go daemon heap arena). Committed_AS rules.\n", d/1024, ca
+        }' /proc/[0-9]*/status 2>/dev/null
+    # Unreclaimable slab is kernel memory no process owns and no process list can explain —
+    # on Broadcom boxes the wl driver's packet pools alone run to a third of RAM. Call it out
+    # so it isn't hunted for in the process table above.
+    awk '/^SUnreclaim:/{ if ($2/1024 > 80) printf "  NB: %.1f MB of unreclaimable kernel slab — owned by no process (Broadcom wl/flow-cache pools,\n      conntrack, the Trend Micro engine). Breakdown: sort -k3 -rn /proc/slabinfo | head\n", $2/1024 }' /proc/meminfo 2>/dev/null
+    echo "--- kernel modules: top 12 by size (cost RAM, invisible to Committed_AS) ---"
+    awk '{printf "  %8.0f KB  %s\n", $2/1024, $1}' /proc/modules 2>/dev/null | sort -rn | head -12
+    awk '{s+=$2} END{printf "  TOTAL modules: %.1f MB\n", s/1048576}' /proc/modules 2>/dev/null
+    echo "--- Trend Micro engine (tdts/IDPfw): which switch keeps it resident ---"
+    # The AiProtection toggles are only one of its consumers — Traffic Analyzer, App
+    # analysis, Web History and Adaptive QoS (qos_type=1) load the same engine, so a user
+    # who "turned AiProtection off" in the GUI can still be paying for it. ONE nvram show
+    # (never a per-key `nvram get` loop — see the 1.5.10 hang note).
+    if awk '{print $1}' /proc/modules 2>/dev/null | grep -qE '^(tdts|IDPfw)$'; then
+        echo "  engine LOADED"
+    else
+        echo "  engine not loaded"
+    fi
+    nvram show 2>/dev/null \
+        | awk -F= '/^(wrs_enable|wrs_app_enable|wrs_cc_enable|wrs_vp_enable|bwdpi_db_enable|bwdpi_wh_enable|apps_analysis|qos_enable|qos_type|TM_EULA)=/{print "  "$0}' \
+        | sort
+    echo "==========================================================="
+    echo "Tip: run this twice — once idle, once while heavy traffic (video) flows through the"
+    echo "tunnel. amneziawg-go's Data column grows by the buffer pool; the delta is what the"
+    echo "tunnel actually needs under your load."
 }
 
 # GOGC for the daemon: lower than Go's default 100, so the heap is collected after +50%
@@ -7413,6 +7504,7 @@ case "$1" in
     ensure_geo)     ensure_geo ;;
     analyze_start)  do_analyze_start ;;
     analyze_stop)   do_analyze_stop ;;
+    mem|memory)     do_mem_report ;;
     ctf_status)     ctf_active && echo "CTF active (ctf_disable=$(nvram get ctf_disable 2>/dev/null))" || echo "CTF not active" ;;
     ctf_disable)    do_ctf_disable ;;
     profile)
@@ -7422,5 +7514,5 @@ case "$1" in
             *)           echo "Usage: $0 profile [list|<1-$AWG_PF_MAX>|next]" ;;
         esac
         ;;
-    *)              echo "Usage: $0 {start|stop|restart|status|diag|profile [list|N|next]|update_geo|download_geo|install_page|uninstall}" ;;
+    *)              echo "Usage: $0 {start|stop|restart|status|diag|mem|profile [list|N|next]|update_geo|download_geo|install_page|uninstall}" ;;
 esac
