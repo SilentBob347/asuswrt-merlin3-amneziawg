@@ -618,6 +618,8 @@ en: {
     NOHS_KS: " — and with the <b>kill-switch ON</b>, all VPN-routed traffic is blocked, so those devices have no internet until the handshake succeeds",
     DNSGEO_USER: "⚠ Domain-based geo lists are active ({0} domains in dnsmasq), but <b>DNS interception is off</b> (compatibility mode). Domains feed the routing only for clients that use the router's DNS — devices with DoH/private DNS bypass the VPN, so in practice mostly the IP lists (GeoIP/Antifilter) route. Not running zapret/Xray/b4? Turn compatibility mode off to re-enable interception.",
     DNSGEO_AUTO: "⚠ Domain-based geo lists are active ({1} domains), but DNS interception is <b>disabled automatically because of {0}</b>. Domains populate only for clients that use the router's DNS; IP lists keep working.",
+    MEM_SQUEEZE_NOSWAP: "⚠ <b>The router is short on memory for this tunnel.</b> The VPN daemon's heap ceiling is pinned to its lowest allowed value ({0} MiB) because this firmware runs strict memory accounting (<code>vm.overcommit_memory=2</code>), and the daemon's packet buffer pool ({1} buffers of 64 KB) alone takes about half of that. Under sustained load — video through the tunnel above all — the daemon runs out of memory, crashes and is restarted by the watchdog, which looks exactly like «the VPN drops every few minutes». AmneziaWG cannot tune this further: both limits are already at the minimum it is allowed to use. <b>Fix it from the router side:</b> create a <b>swap file on the USB drive</b> (amtm → swap, 1 GB). Under strict accounting the ceiling follows the commit limit, and swap raises that limit directly — on a 512 MB router it is in practice the only thing that does. Freeing RAM (AiProtection, unused addons) is worth doing for the box in general, but on its own it rarely lifts this particular ceiling.",
+    MEM_SQUEEZE_SWAP: "⚠ <b>The router is short on memory for this tunnel.</b> The VPN daemon's heap ceiling is pinned to its lowest allowed value ({0} MiB) even though swap is present ({2} MiB), and the packet buffer pool ({1} buffers of 64 KB) alone takes about half of it. Under sustained load the daemon runs out of memory and is restarted by the watchdog — it looks like «the VPN drops every few minutes». <b>Free RAM:</b> turn off AiProtection and unused addons, or reduce the load going through the tunnel.",
     CONF_PENDING: "⚠ The saved connection config differs from the one the tunnel is <b>currently running</b>. «Apply» updates routing/geo on the fly but never restarts the tunnel — press <b>«Restart»</b> to switch to the new config (keys, endpoint, obfuscation, DNS, MTU).",
     GEO_MATCHALL: "⛔ A rule in your <b>custom dnsmasq config</b> is routing <b>every</b> domain into a geo set, so Geo mode sends <b>all</b> traffic through the VPN (every site shows the VPN IP and geo-restricted services stop working). The offending line:<div style=\"margin:6px 0;\"><code>{0}</code></div>The <code>https://</code> (or a stray <code>//</code>) leaves an empty segment, which dnsmasq treats as “match everything”. Fix it in your custom dnsmasq config (<code>/jffs/configs/dnsmasq.conf.add</code>): keep only the bare domain — e.g. <code>ipset=/example.com/awg_dst</code> — then restart dnsmasq or reboot. AmneziaWG's own generated rules are fine; this is a hand-added line.",
     COEX_FOOTER: "<span style=\"opacity:0.85;\">After the changes, click <b>«Apply»</b>. GeoIP routing by IP keeps working in the meantime.</span>",
@@ -1048,6 +1050,8 @@ ru: {
     NOHS_KS: " — а с <b>включённым килл-свичом</b> весь VPN-трафик блокируется, поэтому на этих устройствах интернета не будет, пока рукопожатие не пройдёт",
     DNSGEO_USER: "⚠ Выбраны доменные гео-списки ({0} доменов в dnsmasq), но <b>перехват DNS выключен</b> (режим совместимости). Домены наполняют маршрутизацию только у устройств, использующих DNS роутера, — устройства с DoH/приватным DNS пройдут мимо VPN, т.е. фактически работают в основном IP-списки (GeoIP/Antifilter). Если zapret/Xray/b4 не используются — выключите режим совместимости, и перехват включится.",
     DNSGEO_AUTO: "⚠ Выбраны доменные гео-списки ({1} доменов), но перехват DNS <b>отключён автоматически из-за {0}</b>. Домены будут наполняться только у устройств, использующих DNS роутера; IP-списки работают как обычно.",
+    MEM_SQUEEZE_NOSWAP: "⚠ <b>Роутеру не хватает памяти для этого туннеля.</b> Потолок памяти VPN-демона прижат к минимально допустимому значению ({0} МиБ), потому что прошивка использует строгий учёт памяти (<code>vm.overcommit_memory=2</code>), а пул пакетных буферов демона ({1} буферов по 64 КБ) сам по себе занимает около половины этого объёма. Под нагрузкой — прежде всего при просмотре видео через туннель — демону не хватает памяти, он падает, и его поднимает watchdog: со стороны это выглядит ровно как «VPN отваливается каждые несколько минут». Сам AmneziaWG подстроиться уже не может: оба лимита стоят на минимуме, который ему разрешено использовать. <b>Решается со стороны роутера:</b> создайте <b>файл подкачки на USB-накопителе</b> (amtm → swap, 1 ГБ). При строгом учёте потолок определяется лимитом фиксации памяти, а swap поднимает именно его — на 512-МБ роутере это практически единственное, что здесь работает. Освобождать ОЗУ (AiProtection, лишние аддоны) полезно само по себе, но конкретно этот потолок оно в одиночку поднимает редко.",
+    MEM_SQUEEZE_SWAP: "⚠ <b>Роутеру не хватает памяти для этого туннеля.</b> Потолок памяти VPN-демона прижат к минимально допустимому значению ({0} МиБ), хотя подкачка уже подключена ({2} МиБ), а пул пакетных буферов ({1} буферов по 64 КБ) занимает около половины этого объёма. Под нагрузкой демону не хватает памяти, он падает и поднимается watchdog'ом — выглядит это как «VPN отваливается каждые несколько минут». <b>Освободите ОЗУ:</b> выключите AiProtection и неиспользуемые аддоны либо снизьте нагрузку, идущую через туннель.",
     CONF_PENDING: "⚠ Сохранённая конфигурация подключения отличается от той, на которой туннель <b>работает сейчас</b>. «Применить» обновляет маршрутизацию/гео на лету, но туннель не перезапускает — нажмите <b>«Перезапустить»</b>, чтобы перейти на новую конфигурацию (ключи, endpoint, обфускация, DNS, MTU).",
     GEO_MATCHALL: "⛔ Правило в вашем <b>пользовательском конфиге dnsmasq</b> отправляет в гео-набор <b>все</b> домены, поэтому в режиме Гео через VPN уходит <b>весь</b> трафик (на всех сайтах виден IP VPN, гео-сервисы перестают работать). Проблемная строка:<div style=\"margin:6px 0;\"><code>{0}</code></div>Из-за <code>https://</code> (или лишнего <code>//</code>) появляется пустой сегмент, а его dnsmasq трактует как «совпадает со всем». Исправьте в своём конфиге dnsmasq (<code>/jffs/configs/dnsmasq.conf.add</code>): оставьте только домен — например <code>ipset=/example.com/awg_dst</code> — и перезапустите dnsmasq или перезагрузите роутер. Правила, которые генерирует сам AmneziaWG, тут ни при чём — строка добавлена вручную.",
     COEX_FOOTER: "<span style=\"opacity:0.85;\">После изменений нажмите <b>«Применить»</b>. Geo-маршрутизация по IP при этом продолжает работать.</span>",
@@ -4224,6 +4228,7 @@ function updateStatusUI(s){
     renderCoexistWarning(s);
     renderKernelUnsupWarning(s);
     renderCtfBlockWarning(s);
+    renderMemSqueezeWarning(s);
     renderXrayCaptureWarning(s);
     renderFwVpnWarning(s);
     renderDnsGeoWarning(s);
@@ -4345,6 +4350,27 @@ function renderFwVpnWarning(s){
         el.style.background = '#3a331a'; el.style.borderColor = '#d9c34f'; el.style.color = '#e8dca0';
         el.innerHTML = T('FWVPN_ENABLED', detail);
     }
+    el.style.display = '';
+}
+
+// Memory envelope at its floor (yellow). On a strict-overcommit firmware
+// (vm.overcommit_memory=2) the daemon's soft heap ceiling clamps to its 64MiB floor, while
+// the buffer pool's own floor (512 x 64KB = 32MB — a liveness minimum, three rolling
+// consumers pre-hold a batch each) already pins about half of it. A sustained inbound burst
+// then walks through the soft limit into a Go OOM abort, the watchdog restarts the daemon,
+// and the user sees "the VPN drops every few minutes" — with nothing in the UI explaining
+// why. Both floors are minimums the addon may not go below, so unlike every other tune this
+// one CANNOT be fixed backend-side: the two remaining levers (swap raises CommitLimit, freeing
+// RAM lowers Committed_AS) are the user's. Backend: status.mem_squeeze = "floor" (no swap) |
+// "tight" (swap already present) | "", mem_detail = "<GOMEMLIMIT MiB>|<pool cap>|<swap MiB>".
+function renderMemSqueezeWarning(s){
+    var el = document.getElementById('awg_mem_warn');
+    if(!el) return;
+    var st = (s && s.mem_squeeze) || '';
+    if(st !== 'floor' && st !== 'tight'){ el.style.display = 'none'; el.innerHTML = ''; return; }
+    var d = String((s && s.mem_detail) || '').split('|');
+    el.innerHTML = T(st === 'floor' ? 'MEM_SQUEEZE_NOSWAP' : 'MEM_SQUEEZE_SWAP',
+                     escHtml(d[0] || '?'), escHtml(d[1] || '?'), escHtml(d[2] || '0'));
     el.style.display = '';
 }
 
@@ -4995,6 +5021,7 @@ function initAutocompleteIp(){
                 <div id="awg_coexist_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; background:#3a2e1a; border:1px solid #f0ad4e; border-radius:5px; color:#f0ad4e; font-size:12px; line-height:1.5;"></div>
                 <div id="awg_kernel_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; background:#3a331a; border:1px solid #d9c34f; border-radius:5px; color:#e8dca0; font-size:12px; line-height:1.5;"></div>
                 <div id="awg_ctf_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; background:#3a1a1a; border:1px solid #d9534f; border-radius:5px; color:#e8a0a0; font-size:12px; line-height:1.5;"></div>
+                <div id="awg_mem_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; background:#3a331a; border:1px solid #d9c34f; border-radius:5px; color:#e8dca0; font-size:12px; line-height:1.5;"></div>
                 <div id="awg_xray_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; background:#3a2e1a; border:1px solid #f0ad4e; border-radius:5px; color:#f0d9a8; font-size:12px; line-height:1.5;"></div>
                 <div id="awg_geo_matchall_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; background:#3a1a1a; border:1px solid #d9534f; border-radius:5px; color:#e8a0a0; font-size:12px; line-height:1.5;"></div>
                 <div id="awg_fwvpn_warn" style="display:none; margin:8px 0 2px 0; padding:9px 12px; border:1px solid; border-radius:5px; font-size:12px; line-height:1.5;"></div>

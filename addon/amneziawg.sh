@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.5.22"
+AWG_VERSION="1.5.23"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -4082,6 +4082,17 @@ do_diag(){
         echo "  >>> last daemon exit was a Go runtime OUT-OF-MEMORY: heap hit the ceiling under load (box low on RAM for this throughput) <<<"
     echo "--- runtime / network / TUN ---"
     echo "memory (free):"; free 2>/dev/null | sed 's/^/  /'
+    # Free RAM is the WRONG lens under vm.overcommit_memory=2 — the budget that decides
+    # whether the Go runtime can grow its heap is CommitLimit - Committed_AS. Print both,
+    # plus swap (the user-side lever that raises CommitLimit), so a squeezed box is
+    # diagnosable from the diag alone instead of needing an SSH session.
+    _oc=$(awk '{print $1; exit}' /proc/sys/vm/overcommit_memory 2>/dev/null)
+    _cl=$(awk '/^CommitLimit:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
+    _ca=$(awk '/^Committed_AS:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
+    echo "vm.overcommit_memory : ${_oc:-?}$([ "${_oc:-}" = 2 ] && echo ' (STRICT accounting: the heap budget is CommitLimit - Committed_AS, NOT free RAM)')"
+    echo "commit budget        : CommitLimit=${_cl:-?}MiB Committed_AS=${_ca:-?}MiB swap=$(swap_total_mib)MiB"
+    _msq=$(mem_squeeze_state)
+    [ -n "$_msq" ] && echo "  >>> MEMORY ENVELOPE AT ITS FLOOR ($_msq = state|GOMEMLIMIT MiB|pool cap|swap MiB) — the heap ceiling is pinned to the ${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB overcommit floor while the buffer-pool floor (512 x 64KB = 32MB) pins ~half of it; sustained load OOM-aborts the daemon and the watchdog restarts it (reads as 'the VPN drops now and then'). Both floors are liveness minimums — fix from the box side: swap file on the USB (amtm) and/or free RAM <<<"
     echo "amneziawg-go running : $(pidof amneziawg-go 2>/dev/null || echo no)"
     echo "dnsmasq running      : $(pidof dnsmasq 2>/dev/null || echo no)"
     echo "--- persistent incident log (survives reboot; last LAN-critical events) ---"
@@ -4360,6 +4371,10 @@ AWG_GOTUNE_BELOW_MIB=768
 # commit headroom (floor 64MiB), so the ceiling fits the budget that actually exists
 # instead of quoting 448MiB the box cannot commit.
 AWG_GOMEMLIMIT_COMMIT_PCT=50  # % of (CommitLimit - Committed_AS) usable per daemon
+# Lowest GOMEMLIMIT the strict-overcommit clamp may emit (MiB). Named rather than inlined
+# because mem_squeeze_state compares against it: a ceiling that LANDED on this floor means
+# the clamp ran out of budget, not that it picked a ceiling that fits.
+AWG_GOMEMLIMIT_COMMIT_FLOOR=64
 
 # TRUE when the box has enough RAM to run the daemon with stock Go GC
 # (MemTotal readable AND >= AWG_GOTUNE_BELOW_MIB, and NOT under strict overcommit
@@ -4426,7 +4441,7 @@ compute_go_memlimit(){
         case "$_ca_kb" in ''|*[!0-9]*) _cl_kb='' ;; esac
         if [ -n "$_cl_kb" ] && [ "$_cl_kb" -gt "$_ca_kb" ]; then
             _hr_mib=$(( (_cl_kb - _ca_kb) * AWG_GOMEMLIMIT_COMMIT_PCT / 100 / 1024 ))
-            [ "$_hr_mib" -lt 64 ] && _hr_mib=64
+            [ "$_hr_mib" -lt "$AWG_GOMEMLIMIT_COMMIT_FLOOR" ] && _hr_mib=$AWG_GOMEMLIMIT_COMMIT_FLOOR
             [ "$_hr_mib" -lt "$_lim_mib" ] && _lim_mib=$_hr_mib
         fi
     fi
@@ -4461,6 +4476,67 @@ compute_pool_cap(){
     [ "$_pcl" -lt 512 ]  && _pcl=512
     [ "$_pcl" -gt 1024 ] && _pcl=1024
     printf '%d' "$_pcl"
+}
+
+# SwapTotal in MiB, 0 when the box is swapless — which is the fleet default: routers ship
+# without swap, and the only practical place for a swap file is the USB stick /opt already
+# lives on (amtm creates one). Unreadable meminfo => 0.
+swap_total_mib(){
+    local _sw
+    _sw=$(awk '/^SwapTotal:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
+    case "$_sw" in ''|*[!0-9]*) _sw=0 ;; esac
+    printf '%d' "$_sw"
+}
+
+# "The memory envelope ran out of room" probe (1.5.23). Prints
+# "<state>|<GOMEMLIMIT MiB>|<pool cap>|<SwapTotal MiB>", or NOTHING when the box is fine.
+#
+# WHY THIS EXISTS: compute_go_memlimit's strict-overcommit clamp has a FLOOR
+# (AWG_GOMEMLIMIT_COMMIT_FLOOR = 64MiB) and compute_pool_cap has one too (512 buffers — a
+# LIVENESS minimum, see its header: three rolling consumers pre-hold a 128-buffer batch
+# each). On a box where the clamp LANDS on its floor the two floors collide: 512 x 64KB =
+# 32MB of message buffers inside a 64MiB soft ceiling, i.e. HALF the budget is pool before
+# a single packet is decrypted. A sustained inbound burst then walks straight through the
+# SOFT limit (GOMEMLIMIT never refuses an allocation) into `runtime: out of memory` rc=2 —
+# or into a heap page the kernel refuses to back, which surfaces as a SIGSEGV "unexpected
+# fault address" instead (same starvation, different death shape; see record_daemon_oom).
+#
+# 1.5.22 already scales the pool cap down for exactly this shape, but it CANNOT go below
+# 512 and the heap ceiling CANNOT go below 64MiB — so here the addon has no knob left. The
+# remaining fixes are the user's (swap raises CommitLimit and lifts the whole envelope;
+# freeing RAM lowers Committed_AS), which is why this surfaces as a status flag/banner
+# instead of yet another silent retune.
+#
+# Field case (RT-AX58U 512MB, 388.12_2, diag 2026-09-20): GOMEMLIMIT=64MiB + pool cap 512,
+# no swap, 392 of 512MB already in use with the tunnel DOWN (AiProtection/tdts resident) —
+# ~30 OOM aborts and 9 health-check rollbacks in a single day, plus one crash on
+# receive.go's `bufsArrs[i] = device.GetMessageBuffer()`. The user saw only "the VPN drops
+# now and then", and only while YouTube played through a geo policy (the one thing routed
+# into the tunnel, and the one workload that sustains a line-rate inbound burst).
+#
+# State tokens: "floor" = pinned to the floor with NO swap (adding swap is the actionable
+# fix); "tight" = pinned to the floor WITH swap already present (advice becomes "free RAM",
+# not "add swap again").
+mem_squeeze_state(){
+    local _lim _mib _sw _pool
+    # Roomy boxes run stock Go GC — no ceiling to be pinned against.
+    box_is_roomy && return 0
+    # Only the strict-overcommit clamp can emit a ceiling this low (the RAM-based path
+    # clamps at 96MiB), but read the knob explicitly so a future change to that clamp
+    # can't turn this probe into a false alarm on every 256MB box.
+    [ "$(awk '{print $1; exit}' /proc/sys/vm/overcommit_memory 2>/dev/null)" = "2" ] || return 0
+    _lim=$(compute_go_memlimit)
+    case "$_lim" in *MiB) : ;; *) return 0 ;; esac
+    _mib=${_lim%MiB}
+    case "$_mib" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$_mib" -le "$AWG_GOMEMLIMIT_COMMIT_FLOOR" ] || return 0
+    _pool=$(compute_pool_cap "$_lim")
+    _sw=$(swap_total_mib)
+    if [ "$_sw" -gt 0 ]; then
+        printf 'tight|%s|%s|%s' "$_mib" "${_pool:-1024}" "$_sw"
+    else
+        printf 'floor|%s|%s|0' "$_mib" "${_pool:-1024}"
+    fi
 }
 
 # One-line description of the Go-runtime tuning decision for logs/diag. Every site that
@@ -4846,6 +4922,15 @@ do_start(){
     log_msg "Platform $(uname -m): amneziawg-go=$(elf_arch "$AWG_GO") awg=$(elf_arch "$AWG_BIN")"
     log_msg "ipset binary: ${AWG_IPSET_BIN:-NONE (no working ipset found — geo will be disabled)}${AWG_IPSET_LIB:+ (LD_LIBRARY_PATH=$AWG_IPSET_LIB)}"
     log_msg "Go runtime: $(go_tune_desc)"
+    # The envelope can be at its floor BEFORE a single packet flows (1.5.23) — say so at
+    # start, not only in the incident log after the first crash-loop. Both floors involved
+    # are liveness minimums, so this is advice, never a refusal: the tunnel still starts.
+    local _msq
+    _msq=$(mem_squeeze_state)
+    case "${_msq%%|*}" in
+        floor) log_msg "  WARNING: memory envelope at its floor (GOMEMLIMIT=${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB, strict vm.overcommit, NO swap) — the buffer pool alone pins ~half of it, so sustained load (video through the tunnel) can OOM-abort the daemon and the watchdog will restart it. Fix: swap file on the USB (amtm) — it raises CommitLimit, which is what sets this ceiling." ;;
+        tight) log_msg "  WARNING: memory envelope at its floor (GOMEMLIMIT=${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB, strict vm.overcommit) even with swap — free RAM (AiProtection / co-resident addons) if the tunnel drops under load." ;;
+    esac
     launch_daemon
     if ! wait_for_iface "$IFACE" 10; then
         # Name the failure mode from the captured exit status: a SILENT death (banner only, no
@@ -5651,6 +5736,20 @@ EOF
     local ctf_block=false
     ctf_active && ctf_block=true
 
+    # Memory envelope at its floor (see mem_squeeze_state): GOMEMLIMIT pinned to the
+    # strict-overcommit floor while the buffer-pool floor alone pins ~half of it, which
+    # OOM-aborts the daemon under sustained inbound load and reads to the user as "the VPN
+    # drops every few minutes". Both floors are liveness minimums — the addon cannot tune
+    # its way out, so the page renders the two fixes that are the user's (swap / free RAM).
+    # mem_detail = "<GOMEMLIMIT MiB>|<pool cap>|<SwapTotal MiB>"; the page formats it, so
+    # the numbers stay machine-readable and the wording stays bilingual.
+    local mem_squeeze="" mem_detail="" _msq
+    _msq=$(mem_squeeze_state)
+    if [ -n "$_msq" ]; then
+        mem_squeeze=${_msq%%|*}
+        mem_detail=${_msq#*|}
+    fi
+
     # Config profiles for the UI: the slot the tunnel materializes (active), the user's
     # persisted choice (user; differs from active only under a failover override) and a
     # compact per-slot list for the profile bar. Names are user text — strip control chars,
@@ -5686,7 +5785,7 @@ EOF
     # awg_status.htm or awg_widget.js. The old ".tmp" is removed too in case an upgrade left one.
     rm -f "${STATUS_FILE}.tmp" "${STATUS_FILE}".[0-9]* 2>/dev/null
     cat > "${STATUS_FILE}.$$" << STATUSEOF
-{"running":${running},"starting":${starting},"stopping":${stopping},"version":"${AWG_VERSION}","lang":"${pref_lang}","public_key":"${pub_key}","listen_port":"${listen_port}","interface_addr":"${iface_addr}","peers":${peers_json},"no_handshake":${no_handshake},"conf_pending":${conf_pending},"awg3":${awg3_cap},"awg31":${awg31_cap},"conn_start":${conn_start},"conn_uptime":${conn_uptime},"conn_history":${conn_hist},"profile":{"active":${pf_active},"user":${pf_user},"auto":${pf_auto},"name":"${pf_name}","failover":${pf_failover},"list":[${pf_list}]},"default_policy":"${default_policy}","dpi_tool":"${dpi_tool}","killswitch":${killswitch},"agh":${agh},"coexist_warn":${coexist_warn},"xray_capture":${xray_capture},"xray_ctl":${xray_ctl},"fwvpn_state":"${fwvpn_state}","fwvpn_detail":"${fwvpn_detail}","ctf_block":${ctf_block},"kernel_unsup":${kernel_unsup},"dnsgeo_warn":"${dnsgeo_warn}","geo_matchall_warn":"${geo_matchall_warn}","clients":"${clients_data}","active_rules":${active_rules},"ipset_count":${ipset_count},"geo_domains":${geo_domains},"geo_stats":{${geo_stats}},"geo_downloaded":${geo_downloaded},"geo_busy":${geo_busy},"analyze_active":${analyze_active},"log":"${log_text}"}
+{"running":${running},"starting":${starting},"stopping":${stopping},"version":"${AWG_VERSION}","lang":"${pref_lang}","public_key":"${pub_key}","listen_port":"${listen_port}","interface_addr":"${iface_addr}","peers":${peers_json},"no_handshake":${no_handshake},"conf_pending":${conf_pending},"awg3":${awg3_cap},"awg31":${awg31_cap},"conn_start":${conn_start},"conn_uptime":${conn_uptime},"conn_history":${conn_hist},"profile":{"active":${pf_active},"user":${pf_user},"auto":${pf_auto},"name":"${pf_name}","failover":${pf_failover},"list":[${pf_list}]},"default_policy":"${default_policy}","dpi_tool":"${dpi_tool}","killswitch":${killswitch},"agh":${agh},"coexist_warn":${coexist_warn},"xray_capture":${xray_capture},"xray_ctl":${xray_ctl},"fwvpn_state":"${fwvpn_state}","fwvpn_detail":"${fwvpn_detail}","ctf_block":${ctf_block},"mem_squeeze":"${mem_squeeze}","mem_detail":"${mem_detail}","kernel_unsup":${kernel_unsup},"dnsgeo_warn":"${dnsgeo_warn}","geo_matchall_warn":"${geo_matchall_warn}","clients":"${clients_data}","active_rules":${active_rules},"ipset_count":${ipset_count},"geo_domains":${geo_domains},"geo_stats":{${geo_stats}},"geo_downloaded":${geo_downloaded},"geo_busy":${geo_busy},"analyze_active":${analyze_active},"log":"${log_text}"}
 STATUSEOF
     mv "${STATUS_FILE}.$$" "$STATUS_FILE" 2>/dev/null
 }
