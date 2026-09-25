@@ -697,7 +697,7 @@ en: {
     TBL_AWG3: "AmneziaWG 3.0 — needs a 3.0-capable peer on the OTHER side too. Leave empty unless the provider's config has them.",
     AWG3_UNSUPPORTED: "AmneziaWG 3.0 parameters are not supported by the installed binaries — the fields below are disabled. Update the addon to a build with AWG 3.0 support.",
     HINT_AWG3_HPK: "Shared key — must be IDENTICAL on the server and every client. Requires S1–S4 ≥ 12 (all four, S3 included).",
-    HINT_AWG3_RANGE: "A single number or a \"lo-hi\" range.",
+    HINT_AWG3_CPA: "A single number or a \"lo-hi\" range: extra bytes per data packet. A padded packet never exceeds the largest one sent since the peer's last reply (500 B minimum), so the biggest packets go unpadded.",
     HINT_AWG3_RAT: "How long a session lives before a rekey. Default 120. Must stay below RejectAfterTime.",
     HINT_AWG3_RTO: "Retry interval for an unanswered handshake. Default 5. Very small values cause a handshake storm.",
     HINT_AWG3_RJT: "A session is dropped after this. Default 180. Below RekeyAfterTime the tunnel dies before it can rekey.",
@@ -706,7 +706,7 @@ en: {
     AWG31_UNSUPPORTED: "AmneziaWG 3.1 parameters (RandomTrailers / DisableCookies) are not supported by the installed binaries — those two fields are disabled.",
     OPT_AWG31_UNSET: "— (default: off)",
     HINT_AWG31_RT: "Random-length tail on handshake packets (size obfuscation). SYMMETRIC: a peer without it drops OUR trailered handshakes — set only what the provider's config says. Needs AmneziaWG 3.1+ on both sides.",
-    HINT_AWG31_DC: "Never send WireGuard cookie replies (a load-protection message DPI can fingerprint). Affects this side only — safe with any peer.",
+    HINT_AWG31_DC: "Never send WireGuard cookie replies (a load-protection message DPI can fingerprint). Affects this side only — safe with any peer. Trade-off: this side loses its handshake-flood protection.",
     UNIT_BYTES: "bytes",
     UNIT_SEC: "sec",
     TBL_ROUTING_POLICY: "Routing policy",
@@ -1112,7 +1112,7 @@ ru: {
     TBL_AWG3: "AmneziaWG 3.0 — нужна поддержка 3.0 и на ДРУГОЙ стороне. Оставьте пустым, если их нет в конфиге провайдера.",
     AWG3_UNSUPPORTED: "Параметры AmneziaWG 3.0 не поддерживаются установленными бинарниками — поля ниже отключены. Обновите аддон до сборки с поддержкой AWG 3.0.",
     HINT_AWG3_HPK: "Общий ключ — должен быть ОДИНАКОВЫМ на сервере и на всех клиентах. Требует S1–S4 ≥ 12 (все четыре, включая S3).",
-    HINT_AWG3_RANGE: "Одно число или диапазон «lo-hi».",
+    HINT_AWG3_CPA: "Одно число или диапазон «lo-hi»: добавочные байты к пакету данных. Пакет с добавкой не больше самого крупного, отправленного с последнего ответа пира (минимум 500 Б), поэтому самые крупные пакеты уходят без добавки.",
     HINT_AWG3_RAT: "Через сколько сессия перезаключается. По умолчанию 120. Должно быть меньше RejectAfterTime.",
     HINT_AWG3_RTO: "Интервал повтора неотвеченного хендшейка. По умолчанию 5. Слишком малые значения дают шторм хендшейков.",
     HINT_AWG3_RJT: "После этого времени сессия отбрасывается. По умолчанию 180. Меньше RekeyAfterTime — туннель умрёт, не успев перезаключиться.",
@@ -1121,7 +1121,7 @@ ru: {
     AWG31_UNSUPPORTED: "Параметры AmneziaWG 3.1 (RandomTrailers / DisableCookies) не поддерживаются установленными бинарниками — эти два поля отключены.",
     OPT_AWG31_UNSET: "— (по умолчанию off)",
     HINT_AWG31_RT: "Случайный «хвост» у пакетов рукопожатия (маскировка размера). Симметричный: пир без него отбрасывает НАШИ рукопожатия с хвостом — ставьте только то, что указано в конфиге провайдера. Нужен AmneziaWG 3.1+ с обеих сторон.",
-    HINT_AWG31_DC: "Не отправлять cookie-ответы WireGuard (служебное сообщение защиты от перегрузки, заметное для DPI). Действует только на этой стороне — совместимо с любым пиром.",
+    HINT_AWG31_DC: "Не отправлять cookie-ответы WireGuard (служебное сообщение защиты от перегрузки, заметное для DPI). Действует только на этой стороне — совместимо с любым пиром. Цена: эта сторона теряет защиту от флуда рукопожатиями.",
     UNIT_BYTES: "байт",
     UNIT_SEC: "сек",
     TBL_ROUTING_POLICY: "Политика маршрутизации",
@@ -5237,7 +5237,7 @@ function initAutocompleteIp(){
                 <tr>
                     <th>ContentPaddingAddition</th>
                     <td><input type="text" class="input_6_table" id="awg_cpa" maxlength="21" placeholder="10-40" aria-label="ContentPaddingAddition"> <span data-i18n="UNIT_BYTES">bytes</span>
-                        <div class="awg-hint" data-i18n="HINT_AWG3_RANGE">A single number or a "lo-hi" range.</div></td>
+                        <div class="awg-hint" data-i18n="HINT_AWG3_CPA">A single number or a "lo-hi" range: extra bytes per data packet. A padded packet never exceeds the largest one sent since the peer's last reply (500 B minimum), so the biggest packets go unpadded.</div></td>
                 </tr>
                 <tr>
                     <th>RekeyAfterTime</th>
@@ -5280,7 +5280,7 @@ function initAutocompleteIp(){
                             <option value="on">on</option>
                             <option value="off">off</option>
                         </select>
-                        <div class="awg-hint" data-i18n="HINT_AWG31_DC">Never send WireGuard cookie replies (a load-protection message DPI can fingerprint). Affects this side only — safe with any peer.</div></td>
+                        <div class="awg-hint" data-i18n="HINT_AWG31_DC">Never send WireGuard cookie replies (a load-protection message DPI can fingerprint). Affects this side only — safe with any peer. Trade-off: this side loses its handshake-flood protection.</div></td>
                 </tr>
                 </table>
                 <div id="awg31_unsupported" style="display:none; margin-top:8px; padding:6px 10px; border:1px solid #7a6a3a; background:#4a4230; border-radius:3px; font-size:11px; color:#e8dfc8;"

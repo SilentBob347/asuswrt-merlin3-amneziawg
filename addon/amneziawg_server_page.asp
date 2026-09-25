@@ -125,14 +125,14 @@ en: {
     BTN_GENERATE: "Generate",
     HINT_S_ALL: "S3/S4 are optional for AWG 2.0, but Header protection (AWG 3.0) needs all four ≥ 12.",
     HINT_AWG3_HPK_SRV: "Written into every peer config and QR code — server and clients must share it. Requires S1–S4 ≥ 12.",
-    HINT_AWG3_RANGE: "A single number or a \"lo-hi\" range.",
+    HINT_AWG3_CPA: "A single number or a \"lo-hi\" range: extra bytes per data packet. A padded packet never exceeds the largest one sent since the peer's last reply (500 B minimum), so the biggest packets go unpadded.",
     HINT_AWG3_REKEY: "Seconds. Defaults 120 / 5.",
     HINT_AWG3_REJECT: "Seconds. Defaults 180 / 10. RejectAfterTime must stay above RekeyAfterTime.",
     HINT_AWG3_MHA: "Handshake retries before giving up. Default 18.",
     AWG31_UNSUPPORTED: "AmneziaWG 3.1 parameters (RandomTrailers / DisableCookies) are not supported by the installed binaries — those two fields are disabled.",
     OPT_AWG31_UNSET: "— (default: off)",
     HINT_AWG31_RT_SRV: "SYMMETRIC: \"on\" is written into every peer config/QR — peers need an AmneziaWG 3.1+ client app and must re-import after changing this, or the server's handshakes are dropped.",
-    HINT_AWG31_DC_SRV: "Server-side only: never send cookie replies (a DPI-visible message). Not written into peer configs.",
+    HINT_AWG31_DC_SRV: "Server-side only: never send cookie replies (a DPI-visible message). Not written into peer configs. Trade-off: no protection against a flood of valid handshakes — each costs the router an X25519 operation, so anyone holding a peer config (or replaying a captured handshake) can max out its CPU. Keep off unless DPI demands it.",
     MSG_HPK_S_BUMPED: "Header protection needs S1–S4 ≥ 12, so %s were raised automatically. Re-export the peer configs / QR codes — clients must use the same values.",
     SEC_PEERS: "Peers (devices that connect to this router)",
     SEC_LOG: "Log",
@@ -231,14 +231,14 @@ ru: {
     BTN_GENERATE: "Сгенерировать",
     HINT_S_ALL: "S3/S4 необязательны для AWG 2.0, но для Header protection (AWG 3.0) нужны все четыре ≥ 12.",
     HINT_AWG3_HPK_SRV: "Попадает в каждый конфиг пира и QR-код — на сервере и клиентах должен совпадать. Требует S1–S4 ≥ 12.",
-    HINT_AWG3_RANGE: "Одно число или диапазон «lo-hi».",
+    HINT_AWG3_CPA: "Одно число или диапазон «lo-hi»: добавочные байты к пакету данных. Пакет с добавкой не больше самого крупного, отправленного с последнего ответа пира (минимум 500 Б), поэтому самые крупные пакеты уходят без добавки.",
     HINT_AWG3_REKEY: "Секунды. По умолчанию 120 / 5.",
     HINT_AWG3_REJECT: "Секунды. По умолчанию 180 / 10. RejectAfterTime должен быть больше RekeyAfterTime.",
     HINT_AWG3_MHA: "Сколько раз повторять хендшейк перед сдачей. По умолчанию 18.",
     AWG31_UNSUPPORTED: "Параметры AmneziaWG 3.1 (RandomTrailers / DisableCookies) не поддерживаются установленными бинарниками — эти два поля отключены.",
     OPT_AWG31_UNSET: "— (по умолчанию off)",
     HINT_AWG31_RT_SRV: "Симметричный: при «on» попадает в каждый конфиг пира и QR — пирам нужно приложение с AmneziaWG 3.1+, и после изменения конфиг надо переимпортировать, иначе рукопожатия сервера отбрасываются.",
-    HINT_AWG31_DC_SRV: "Только на сервере: не отправлять cookie-ответы (служебное сообщение, заметное для DPI). В конфиги пиров не записывается.",
+    HINT_AWG31_DC_SRV: "Только на сервере: не отправлять cookie-ответы (служебное сообщение, заметное для DPI). В конфиги пиров не записывается. Цена: нет защиты от флуда настоящими рукопожатиями — каждое стоит роутеру операции X25519, и любой, у кого есть конфиг пира (или кто повторяет перехваченное рукопожатие), может загрузить его процессор. Без нужды не включайте.",
     MSG_HPK_S_BUMPED: "Для Header protection нужны S1–S4 ≥ 12, поэтому %s подняты автоматически. Переэкспортируйте конфиги пиров / QR — на клиентах должны быть те же значения.",
     SEC_PEERS: "Пиры (устройства, подключающиеся к роутеру)",
     SEC_LOG: "Журнал",
@@ -1311,7 +1311,7 @@ function initial(){
                 <tr>
                     <th>ContentPaddingAddition</th>
                     <td><input type="text" id="awgs_cpa_f" class="input_6_table" maxlength="21" placeholder="10-40" onchange="markDirty();">
-                        <div class="awg-hint" data-i18n="HINT_AWG3_RANGE">A single number or a "lo-hi" range.</div></td>
+                        <div class="awg-hint" data-i18n="HINT_AWG3_CPA">A single number or a "lo-hi" range: extra bytes per data packet. A padded packet never exceeds the largest one sent since the peer's last reply (500 B minimum), so the biggest packets go unpadded.</div></td>
                 </tr>
                 <tr>
                     <th>RekeyAfterTime / RekeyTimeout</th>
@@ -1350,7 +1350,7 @@ function initial(){
                             <option value="on">on</option>
                             <option value="off">off</option>
                         </select>
-                        <div class="awg-hint" data-i18n="HINT_AWG31_DC_SRV">Server-side only: never send cookie replies (a DPI-visible message). Not written into peer configs.</div></td>
+                        <div class="awg-hint" data-i18n="HINT_AWG31_DC_SRV">Server-side only: never send cookie replies (a DPI-visible message). Not written into peer configs. Trade-off: no protection against a flood of valid handshakes — each costs the router an X25519 operation, so anyone holding a peer config (or replaying a captured handshake) can max out its CPU. Keep off unless DPI demands it.</div></td>
                 </tr>
                 </table>
                 <div id="awgs31_unsupported" class="awg-hint" style="display:none; margin:6px 0 0 5px; padding:6px 10px; border:1px solid #7a6a3a; background:#4a4230; border-radius:3px; color:#e8dfc8;"

@@ -305,7 +305,10 @@ srv_generate_config(){
     # RandomTrailers is SYMMETRIC: with it on, the server only ACCEPTS trailered handshakes
     # and always SENDS trailered ones — so every peer must carry `RandomTrailers = on` too
     # (the page writes it into each generated peer config/QR) and needs an AmneziaWG 3.1+
-    # client app. DisableCookies is local: the server just never sends cookie replies.
+    # client app. DisableCookies is local (never mirrored to peers): the server sends no cookie
+    # replies and, since daemon v3.1.20260828 (b5928ef), also skips the whole under-load
+    # MAC2/rate-limit path — handshakes are no longer dropped under load, but there is no
+    # handshake-flood defence at all (see HINT_AWG31_DC_SRV).
     local rt dc awg31=0
     rt=$(get_setting awgs_rt)
     dc=$(get_setting awgs_dc)
