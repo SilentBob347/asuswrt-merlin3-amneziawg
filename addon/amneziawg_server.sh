@@ -248,7 +248,8 @@ srv_generate_config(){
         _ic=$((_ic + 1))
     done
     if [ -n "$initdata" ]; then
-        decoded=$(echo "$initdata" | base64 -d 2>/dev/null)
+        b64d_init
+        decoded=$(echo "$initdata" | b64d)   # the client lib's fallback chain (no base64 on stock Merlin)
         i1=$(echo "$decoded" | awk '/^I1 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
         i2=$(echo "$decoded" | awk '/^I2 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
         i3=$(echo "$decoded" | awk '/^I3 /{sub(/^[^=]+=[ ]?/,"");print;exit}')

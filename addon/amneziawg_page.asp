@@ -382,6 +382,10 @@ textarea.awg-geo-ta {
 </style>
 <script>
 var custom_settings = <% get_custom_settings(); %>;
+// One-shot keys of the retired browser .ipk upload (1.1.52-1.5.23): never meant to persist, and
+// every byte left in the store counts against the firmware's shared 8 KB cap — drop any leftover
+// so the next save sweeps it out (the page's saves are full-replace).
+(function(){ for(var k in custom_settings){ if(custom_settings.hasOwnProperty(k) && k.indexOf('awg_ipk_') === 0) delete custom_settings[k]; } })();
 var statusTimer = null;
 var statusFails = 0;
 var awgLoaded = false;
@@ -455,38 +459,15 @@ en: {
     MODAL_CHANGELOG_VER: " — v{0}",
     MODAL_LOADING_CHANGELOG: "Loading changelog…",
     MODAL_CHANGELOG_FAILED: "Could not load the changelog.",
-    MSG_CLOSE_DURING_UPLOAD: "An upload/install is in progress. Close the window and stop tracking it?",
     // ---- install actions ----
-    MSG_PICK_IPK: "Choose an .ipk file to install.",
-    MSG_NOT_IPK_CONFIRM: "The file doesn't look like an .ipk. Install anyway?",
     MSG_ENTER_VERSION: "Enter a version as X.Y.Z, e.g. 1.1.49",
     MSG_VERSION_FORMAT: "Version as X.Y.Z, e.g. 1.1.49",
     MSG_VERSION_INSTALLED_REINSTALL: "Version v{0} is already installed. Reinstall?",
     MSG_LATEST_VERSION: "You already have the latest version{0}.",
     MSG_LATEST_VERSION_VER: " (v{0})",
-    BTN_INSTALLING: "Installing…",
     BTN_INSTALL: "Install",
-    MSG_INSTALL_FAILED: "Installation failed: {0}",
-    // ---- upload (manual .ipk) ----
-    UP_READING_FILE: "Reading file…",
-    UP_READ_FAILED: "could not read the file.",
-    UP_FILE_EMPTY: "the file is empty.",
-    UP_SETTINGS_TOO_BIG: "settings are too large to upload a file via the UI.",
-    UP_PROGRESS: "Uploading {0}/{1}…",
-    UP_TRANSFER_FAILED: "transfer failed ",
-    UP_PART: "(part {0}/{1}).",
-    UP_NO_ROUTER_RESPONSE: "no response from the router (part {0}/{1}).",
-    UP_VERIFYING: "Verifying and installing the package…",
-    UP_DONE_RELOADING: "Done! Reloading the page…",
-    UP_INSTALL_FAILED: "installation failed.",
-    // ---- upload error codes (from backend slugs) ----
-    ERR_GENERIC: "Installation failed",
-    ERR_NO_DATA: "No upload data",
-    ERR_DECODE_FAILED: "Decoding error",
-    ERR_SIZE_MISMATCH: "Size mismatch — upload corrupted",
-    ERR_CORRUPT: "File corrupted or not .ipk",
-    ERR_NOT_IPK: "Not an opkg package (.ipk)",
-    ERR_OPKG_FAILED: "opkg install failed",
+    // ---- install from a local file (SSH only since 1.5.24) ----
+    INSTALL_FILE_HELP: "A local <code>.ipk</code> can't be uploaded through this page: the router firmware discards any addon settings save over {1} KB, and a package weighs megabytes. Install it over SSH instead:<br>1. Copy the file to the router's <code>/tmp</code> — WinSCP with file protocol <b>SCP</b>, or<br><code>scp -O amneziawg_*.ipk &lt;login&gt;@{0}:/tmp/</code> (<code>-O</code>: the router has no SFTP — drop it if your scp rejects it; add <code>-P &lt;port&gt;</code> if SSH isn't on 22)<br>2. In an SSH session run<br><code>/opt/etc/init.d/S99amneziawg install_ipk /tmp/amneziawg_X.Y.Z-1_&lt;arch&gt;.ipk</code><br>The package is checked (gzip CRC + .ipk structure) and installed exactly like an update from this page: geo lists are kept, the VPN is stopped for the install — start it again afterwards. If the router can reach GitHub, «Choose version» installs any published version without a file.",
     // ---- apply / restart ----
     MSG_FORCE_RESTART_CONFIRM: "The VPN will be fully restarted (stop → start) — the connection will drop briefly (devices on a VPN policy lose access for a few seconds). Routes and the firewall will also be rebuilt. Continue?",
     BTN_APPLYING: "Applying…",
@@ -707,7 +688,8 @@ en: {
     MSG_PF_DEL_ACTIVE: "Can't delete the active profile — switch to another one first.",
     MSG_PF_UNSAVED: "Profile \"{0}\" has unsaved edits in the form — discard them?",
     MSG_PF_FULL: "All {0} profile slots are in use.",
-    MSG_SETTINGS_TOO_BIG: "Settings are too large to save ({0} KB — the firmware caps one save at ~50 KB): shorten I1-I5 junk data or delete an unused profile.",
+    MSG_SETTINGS_TOO_BIG: "Settings don't fit the firmware's store: {0} of {1} bytes. Asuswrt-Merlin does not save a larger set at all (the whole save is discarded), and this budget is shared with every other addon. Shorten I1-I5 junk data, delete an unused profile, or trim the GeoCustom lists.",
+    MSG_SETTING_TOO_LONG: "«{0}» is too long for the firmware's store: {1} of {2} characters (the firmware silently cuts longer values). Shorten it.",
     SEC_CONFIG: "Configuration",
     BTN_IMPORT_CONF_FILE: "Import .conf",
     TITLE_IMPORT_CONF_FILE: "Import a .conf file from the Amnezia VPN client",
@@ -784,7 +766,7 @@ en: {
     TH_CUSTOM_IPS: "Custom IPs / subnets",
     HINT_CUSTOM_IPS: "Comma- or newline-separated: individual IPs or CIDR subnets.",
     TBL_GEO_CUSTOM: "GeoCustom — your own domains / IPs / files",
-    HINT_GEO_CUSTOM_FORMAT: "One entry per line. A domain (<code>example.com</code>) is routed via DNS; an IP or CIDR subnet (<code>1.2.3.0/24</code>) is added to the ipset. Lines starting with <code>#</code> are comments. A URL must return a plain-text list in this format.",
+    HINT_GEO_CUSTOM_FORMAT: "One entry per line. A domain (<code>example.com</code>) is routed via DNS; an IPv4 address or CIDR subnet (<code>1.2.3.0/24</code>) is added to the ipset (IPv6 is skipped). Text after <code>#</code> is a comment. A URL must return a plain-text list in this format. Files live inside the firmware's settings store, which holds only <b>about 2 KB of text per tab (~150 lines)</b> — put a bigger list online (e.g. a GitHub raw link) and add it as a URL source: those have no size limit.",
     TH_GEO_FILES: "Custom files",
     TH_GEO_URLS: "URL sources",
     TBL_GEO_MODE: "How the lists work",
@@ -801,7 +783,13 @@ en: {
     BTN_REMOVE: "Remove",
     PH_GEO_FILE_NAME: "name (a-z, 0-9)",
     PH_GEO_URL: "https://example.com/list.txt",
-    MSG_GEO_FILES_TOO_BIG: "Custom files are too large to store in settings. Reduce the content or use a URL source for big lists.",
+    MSG_GEO_FILES_TOO_BIG: "«Custom files»{0} on the «{1}» tab take {2} characters once encoded, but the firmware's settings store keeps at most {3} per tab (about 2 KB of text, ~150 CIDR lines) and silently cuts the rest. Shrink the files, or put a big list online (e.g. a GitHub raw link) and add it under «URL sources» — those have no size limit.",
+    GEO_FILES_EXC_SUFFIX: " (exclusions)",
+    GEO_FILE_CUT: "⚠ The firmware cut this file when it was saved (its settings store keeps ~2 KB of text per tab): only the part that survived is shown, the partial last line was dropped, and any files after it were lost. Shrink it, or move the list to a URL source.",
+    GEO_FILE_UNREADABLE: "⚠ The stored content of this file is damaged (cut by the firmware's settings store) and can't be shown. Paste it again (smaller) or delete the row.",
+    MSG_GEO_URL_BAD: "«URL sources» on the «{0}» tab: \"{1}\" is not an http:// or https:// link.",
+    MSG_GEO_URL_IDN: "«URL sources» on the «{0}» tab: \"{1}\" has a non-Latin host name — the router's downloader needs its punycode (xn--…) form. Copy the link from the browser's address bar after opening it, or convert the domain with any IDN converter.",
+    GEO_URLS_CUT: "⚠ The firmware cut this URL list when it was saved (its settings store keeps ~3000 characters per value): the last, partial link was dropped and any links after it were lost. Re-add them.",
     TBL_ANTIFILTER: "Geo Antifilter — RKN lists (antifilter.download)",
     TH_ANTIFILTER_IP: "Antifilter IP lists",
     AF_ALLYOUNEED: " allyouneed — all the needed subnets (~15K) ",
@@ -847,10 +835,9 @@ en: {
     ARIA_INSTALL_MODE: "Install method",
     OPT_INSTALL_AUTO: "Automatic (latest)",
     OPT_INSTALL_VERSION: "Choose version",
-    OPT_INSTALL_FILE: "Manually from file",
+    OPT_INSTALL_FILE: "From a local file (over SSH)",
     PH_VERSION: "e.g. 1.1.49",
     ARIA_VERSION_TO_INSTALL: "Version to install",
-    ARIA_IPK_FILE: ".ipk file to install",
     BTN_CHECK_UPDATES: "Check for updates",
     BTN_CLOSE: "Close",
     MODAL_DIAG_TITLE: "Diagnostic data",
@@ -887,38 +874,15 @@ ru: {
     MODAL_CHANGELOG_VER: " — v{0}",
     MODAL_LOADING_CHANGELOG: "Загрузка списка изменений…",
     MODAL_CHANGELOG_FAILED: "Не удалось загрузить список изменений.",
-    MSG_CLOSE_DURING_UPLOAD: "Идёт загрузка/установка. Закрыть окно и прекратить отслеживание?",
     // ---- install actions ----
-    MSG_PICK_IPK: "Выберите .ipk файл для установки.",
-    MSG_NOT_IPK_CONFIRM: "Файл не похож на .ipk. Всё равно установить?",
     MSG_ENTER_VERSION: "Введите версию в формате X.Y.Z, например 1.1.49",
     MSG_VERSION_FORMAT: "Версия в формате X.Y.Z, например 1.1.49",
     MSG_VERSION_INSTALLED_REINSTALL: "Версия v{0} уже установлена. Переустановить?",
     MSG_LATEST_VERSION: "У вас последняя версия{0}.",
     MSG_LATEST_VERSION_VER: " (v{0})",
-    BTN_INSTALLING: "Установка…",
     BTN_INSTALL: "Установить",
-    MSG_INSTALL_FAILED: "Не удалось установить: {0}",
-    // ---- upload (manual .ipk) ----
-    UP_READING_FILE: "Чтение файла…",
-    UP_READ_FAILED: "не удалось прочитать файл.",
-    UP_FILE_EMPTY: "файл пуст.",
-    UP_SETTINGS_TOO_BIG: "настройки слишком велики для загрузки файла через UI.",
-    UP_PROGRESS: "Загрузка {0}/{1}…",
-    UP_TRANSFER_FAILED: "сбой передачи ",
-    UP_PART: "(часть {0}/{1}).",
-    UP_NO_ROUTER_RESPONSE: "нет ответа роутера (часть {0}/{1}).",
-    UP_VERIFYING: "Проверка и установка пакета…",
-    UP_DONE_RELOADING: "Готово! Перезагрузка страницы…",
-    UP_INSTALL_FAILED: "установка не удалась.",
-    // ---- upload error codes (from backend slugs) ----
-    ERR_GENERIC: "Установка не удалась",
-    ERR_NO_DATA: "Нет данных загрузки",
-    ERR_DECODE_FAILED: "Ошибка декодирования",
-    ERR_SIZE_MISMATCH: "Размер не совпал — загрузка повреждена",
-    ERR_CORRUPT: "Файл повреждён или не .ipk",
-    ERR_NOT_IPK: "Это не пакет opkg (.ipk)",
-    ERR_OPKG_FAILED: "opkg install не удался",
+    // ---- install from a local file (SSH only since 1.5.24) ----
+    INSTALL_FILE_HELP: "Свой <code>.ipk</code> через эту страницу загрузить нельзя: прошивка роутера отбрасывает любое сохранение настроек аддона больше {1} КБ, а пакет весит мегабайты. Поставьте его по SSH:<br>1. Скопируйте файл в <code>/tmp</code> роутера — WinSCP с протоколом <b>SCP</b> или<br><code>scp -O amneziawg_*.ipk &lt;логин&gt;@{0}:/tmp/</code> (<code>-O</code> — SFTP на роутере нет; если scp его не знает, уберите; если SSH не на 22-м порту, добавьте <code>-P &lt;порт&gt;</code>)<br>2. В SSH-сессии выполните<br><code>/opt/etc/init.d/S99amneziawg install_ipk /tmp/amneziawg_X.Y.Z-1_&lt;arch&gt;.ipk</code><br>Пакет проверяется (CRC gzip + структура .ipk) и ставится так же, как обновление с этой страницы: гео-списки сохраняются, VPN на время установки останавливается — потом запустите его снова. Если роутер видит GitHub, «Выбрать версию» поставит любую опубликованную версию без файла.",
     // ---- apply / restart ----
     MSG_FORCE_RESTART_CONFIRM: "VPN будет полностью перезапущен (stop → start) — соединение временно прервётся (устройства с политикой VPN потеряют доступ на несколько секунд). Заодно пересоберутся маршруты и firewall. Продолжить?",
     BTN_APPLYING: "Применение…",
@@ -1139,7 +1103,8 @@ ru: {
     MSG_PF_DEL_ACTIVE: "Нельзя удалить активный профиль — сначала переключитесь на другой.",
     MSG_PF_UNSAVED: "У профиля «{0}» есть несохранённые правки в форме — отбросить их?",
     MSG_PF_FULL: "Все {0} слотов профилей заняты.",
-    MSG_SETTINGS_TOO_BIG: "Настройки слишком велики для сохранения ({0} КБ — прошивка ограничивает одно сохранение ~50 КБ): сократите I1-I5 или удалите неиспользуемый профиль.",
+    MSG_SETTINGS_TOO_BIG: "Настройки не помещаются в хранилище прошивки: {0} из {1} байт. Больший набор Asuswrt-Merlin не сохраняет вообще (сохранение отбрасывается целиком), а этот лимит общий для всех аддонов. Сократите I1-I5, удалите неиспользуемый профиль или уменьшите списки GeoCustom.",
+    MSG_SETTING_TOO_LONG: "«{0}» не помещается в хранилище прошивки: {1} из {2} символов (длиннее прошивка молча обрезает). Сократите.",
     SEC_CONFIG: "Конфигурация",
     BTN_IMPORT_CONF_FILE: "Импорт .conf",
     TITLE_IMPORT_CONF_FILE: "Импорт .conf-файла из клиента Amnezia VPN",
@@ -1216,7 +1181,7 @@ ru: {
     TH_CUSTOM_IPS: "Свои IP / подсети",
     HINT_CUSTOM_IPS: "Через запятую или с новой строки: отдельные IP или подсети CIDR.",
     TBL_GEO_CUSTOM: "GeoCustom — свои домены / IP / файлы",
-    HINT_GEO_CUSTOM_FORMAT: "Один элемент в строке. Домен (<code>example.com</code>) маршрутизируется через DNS; IP или подсеть CIDR (<code>1.2.3.0/24</code>) добавляется в ipset. Строки, начинающиеся с <code>#</code>, — комментарии. Файл по ссылке должен возвращать простой текстовый список в этом формате.",
+    HINT_GEO_CUSTOM_FORMAT: "Один элемент в строке. Домен (<code>example.com</code>) маршрутизируется через DNS; IPv4-адрес или подсеть CIDR (<code>1.2.3.0/24</code>) добавляется в ipset (IPv6 пропускается). Текст после <code>#</code> — комментарий. Файл по ссылке должен возвращать простой текстовый список в этом формате. Свои файлы хранятся в настройках прошивки, а туда помещается лишь <b>около 2 КБ текста на вкладку (~150 строк)</b> — большой список выложите по ссылке (например, raw-ссылка GitHub) и добавьте как URL-источник: у них ограничения размера нет.",
     TH_GEO_FILES: "Свои файлы",
     TH_GEO_URLS: "URL-источники",
     TBL_GEO_MODE: "Как работают списки",
@@ -1233,7 +1198,13 @@ ru: {
     BTN_REMOVE: "Удалить",
     PH_GEO_FILE_NAME: "имя (a-z, 0-9)",
     PH_GEO_URL: "https://example.com/list.txt",
-    MSG_GEO_FILES_TOO_BIG: "Свои файлы слишком большие для хранения в настройках. Уменьшите содержимое или используйте URL-источник для больших списков.",
+    MSG_GEO_FILES_TOO_BIG: "«Свои файлы»{0} на вкладке «{1}» занимают {2} символов в закодированном виде, а хранилище настроек прошивки держит не больше {3} на вкладку (около 2 КБ текста, ~150 строк CIDR) и молча обрезает остальное. Уменьшите файлы или выложите большой список по ссылке (например, raw-ссылка GitHub) и добавьте её в «URL-источники» — у них ограничения размера нет.",
+    GEO_FILES_EXC_SUFFIX: " (исключения)",
+    GEO_FILE_CUT: "⚠ Прошивка обрезала этот файл при сохранении (её хранилище настроек держит ~2 КБ текста на вкладку): показана уцелевшая часть, неполная последняя строка отброшена, файлы после него потеряны. Уменьшите файл или перенесите список в URL-источник.",
+    GEO_FILE_UNREADABLE: "⚠ Сохранённое содержимое файла повреждено (обрезано хранилищем прошивки) и не может быть показано. Вставьте его заново (поменьше) или удалите строку.",
+    MSG_GEO_URL_BAD: "«URL-источники» на вкладке «{0}»: «{1}» — не ссылка http:// или https://.",
+    MSG_GEO_URL_IDN: "«URL-источники» на вкладке «{0}»: в «{1}» домен не латиницей — загрузчику роутера нужна его punycode-форма (xn--…). Откройте ссылку в браузере и скопируйте её из адресной строки или переведите домен любым IDN-конвертером.",
+    GEO_URLS_CUT: "⚠ Прошивка обрезала этот список ссылок при сохранении (её хранилище держит ~3000 символов на значение): последняя неполная ссылка отброшена, ссылки после неё потеряны. Добавьте их заново.",
     TBL_ANTIFILTER: "Geo Antifilter — РКН-списки (antifilter.download)",
     TH_ANTIFILTER_IP: "Antifilter IP-списки",
     AF_ALLYOUNEED: " allyouneed — все нужные подсети (~15K) ",
@@ -1279,10 +1250,9 @@ ru: {
     ARIA_INSTALL_MODE: "Способ установки",
     OPT_INSTALL_AUTO: "Автоматически (последняя)",
     OPT_INSTALL_VERSION: "Выбрать версию",
-    OPT_INSTALL_FILE: "Вручную через файл",
+    OPT_INSTALL_FILE: "Из своего файла (по SSH)",
     PH_VERSION: "напр. 1.1.49",
     ARIA_VERSION_TO_INSTALL: "Версия для установки",
-    ARIA_IPK_FILE: "Файл .ipk для установки",
     BTN_CHECK_UPDATES: "Проверить обновления",
     BTN_CLOSE: "Закрыть",
     MODAL_DIAG_TITLE: "Диагностические данные",
@@ -1294,8 +1264,8 @@ ru: {
 function T(key){
     var d = AWG_I18N[AWG_LANG] || AWG_I18N.en;
     var s = (d[key] != null) ? d[key] : (AWG_I18N.en[key] != null ? AWG_I18N.en[key] : key);
-    for (var i = 1; i < arguments.length; i++){ s = s.replace('{'+(i-1)+'}', arguments[i]); }
-    return s;
+    var a = arguments;
+    return s.replace(/\{(\d+)\}/g, function(m, n){ n = +n + 1; return n < a.length ? String(a[n]) : m; });
 }
 // Localize static DOM tagged with data-i18n* attributes. Called first in initial().
 function applyI18n(){
@@ -1313,12 +1283,6 @@ function applyI18n(){
     nodes = document.querySelectorAll('[data-i18n-val]');
     for(i=0;i<nodes.length;i++){ el=nodes[i]; el.value = T(el.getAttribute('data-i18n-val')); }
 }
-// Localize backend upload-error codes (see amneziawg.sh). Falls back to a generic message.
-function awgErrText(code){
-    var k = 'ERR_' + String(code||'').toUpperCase();
-    return (AWG_I18N[AWG_LANG] && AWG_I18N[AWG_LANG][k]) || (AWG_I18N.en[k]) || T('ERR_GENERIC');
-}
-
 // Relative handshake age computed CLIENT-SIDE from the raw epoch the backend now emits
 // (hs_epoch). This is what makes the counter tick live every second without a backend
 // round-trip. Returns null when there is no usable epoch (0/absent) so the caller falls
@@ -1571,7 +1535,18 @@ function syncViaVpnToggles(){
     if(u) custom_settings.awg_update_via_awg = u.checked ? '1' : '0';
 }
 
-function doUpdate(version){
+function doUpdate(version, latest){
+    // Pre-flight, before any UI change: fold in what this POST carries (via-VPN toggles + the pin),
+    // then check the firmware's WHOLE-store cap only — every value in the object is a firmware
+    // read-back or passed Apply's own check. Over the cap the firmware would drop the POST whole:
+    // a user-chosen version is refused (returns false — the caller keeps the modal open); "latest"
+    // is posted with NO settings, which the backend resolves by itself.
+    var snapU = awgSettingsSnapshot();
+    syncViaVpnToggles();
+    if(version) custom_settings.awg_update_version = String(version);
+    var ovfU = awgSettingsOverflow(custom_settings, true);
+    if(version) delete custom_settings.awg_update_version;
+    if(ovfU && version && !latest){ awgSettingsRestore(snapU); alert(awgOverflowMsg(ovfU)); return false; }
     var badge = document.getElementById('awg_badge');
     if(badge){ badge.className = 'awg-status connecting'; badge.innerHTML = '&#9679; ' + escHtml(T('STAT_UPDATING')); }
     awgConnUp = false;
@@ -1593,7 +1568,9 @@ function doUpdate(version){
     // therefore still writes a page-load snapshot of everything ELSE — a known limitation of the
     // firmware's whole-object custom_settings API; only paths with no settings intent can clear.
     if(version) custom_settings.awg_update_version = String(version);
-    document.getElementById('amng_custom').value = JSON.stringify(custom_settings);
+    // Over the firmware's store limit (see AWG_CS_*) the POST would be dropped whole anyway: send
+    // no settings then — "latest" needs none (a pinned version was refused above).
+    document.getElementById('amng_custom').value = ovfU ? '' : JSON.stringify(custom_settings);
     if(version) delete custom_settings.awg_update_version;
     document.form.action_script.value = "start_awgdoupdate";
     awgSubmitForm();
@@ -1646,8 +1623,6 @@ function openUpdateModal(){
     document.addEventListener('keydown', awgModalKeydown);
     var firstCtl = document.getElementById('awg_install_mode');
     if(firstCtl){ try { firstCtl.focus(); } catch(e){} }
-    awgManualUI(false);    // hide any leftover upload progress
-    awgManualEnd(false);   // re-enable the install button
     awgModeUI();           // show the input matching the current mode
     refreshModalState();   // status line + install button visibility
     loadChangelog(ref, function(text, ok){
@@ -1658,9 +1633,6 @@ function openUpdateModal(){
 }
 
 function closeUpdateModal(){
-    if(awgUploading && !confirm(T('MSG_CLOSE_DURING_UPLOAD'))) return;
-    awgRun++;             // invalidate any in-flight upload/poll loops
-    awgManualEnd(false);  // reset the install button + awgUploading flag
     document.removeEventListener('keydown', awgModalKeydown);
     var m = document.getElementById('awg_update_modal');
     if(m) m.style.display = 'none';
@@ -1673,13 +1645,21 @@ function awgModalKeydown(e){
     if(e.key === 'Escape' || e.keyCode === 27) closeUpdateModal();
 }
 
-// Show the version field / file field for the selected install mode.
+// Show the version field / the local-file instructions for the selected install mode.
+// "From a local file" is SSH-only since 1.5.24: the browser upload it used to offer could never
+// work (the firmware discards any settings POST over 8 KB — see AWG_CS_TOTAL_MAX), so the mode
+// now shows the two commands instead of a file picker, with this router's address filled in.
 function awgModeUI(){
     var mode = document.getElementById('awg_install_mode').value;
     var vin = document.getElementById('awg_version_input');
-    var fin = document.getElementById('awg_ipk_file');
+    var help = document.getElementById('awg_file_help');
+    var btn = document.getElementById('awg_install_btn');
     if(vin) vin.style.display = (mode === 'version') ? '' : 'none';
-    if(fin) fin.style.display = (mode === 'file') ? '' : 'none';
+    if(btn) btn.style.display = (mode === 'file') ? 'none' : '';
+    if(help){
+        help.style.display = (mode === 'file') ? 'block' : 'none';
+        if(mode === 'file') help.innerHTML = T('INSTALL_FILE_HELP', escHtml(location.hostname || '192.168.50.1'), Math.round(AWG_CS_TOTAL_MAX / 1024));
+    }
     // When the user picks the "choose version" mode, focus the version field right away.
     if(mode === 'version' && vin){ try { vin.focus(); vin.select(); } catch(e){} }
 }
@@ -1687,19 +1667,10 @@ function awgModeUI(){
 // Install action, dispatched by the mode selector:
 //   auto    -> latest published version (auto-detected)
 //   version -> an exact published version X.Y.Z
-//   file    -> a locally chosen .ipk, uploaded chunk-by-chunk (see awgManualStart)
+//   file    -> nothing to do here: installed over SSH (install_ipk), see awgModeUI
 function installUpdate(){
-    if(awgUploading) return;
     var mode = document.getElementById('awg_install_mode').value;
-
-    if(mode === 'file'){
-        var fsel = document.getElementById('awg_ipk_file');
-        var f = (fsel && fsel.files && fsel.files[0]) || null;
-        if(!f){ alert(T('MSG_PICK_IPK')); return; }
-        if(!/\.ipk$/i.test(f.name) && !confirm(T('MSG_NOT_IPK_CONFIRM'))) return;
-        awgManualStart(f);
-        return;
-    }
+    if(mode === 'file') return;
 
     if(mode === 'version'){
         var inp = document.getElementById('awg_version_input');
@@ -1707,8 +1678,7 @@ function installUpdate(){
         if(!v){ alert(T('MSG_ENTER_VERSION')); return; }
         if(!/^\d+\.\d+\.\d+$/.test(v)){ alert(T('MSG_VERSION_FORMAT')); return; }
         if(awgCurrentVersion && v === awgCurrentVersion && !confirm(T('MSG_VERSION_INSTALLED_REINSTALL', v))) return;
-        closeUpdateModal();
-        doUpdate(v);
+        if(doUpdate(v) !== false) closeUpdateModal();
         return;
     }
 
@@ -1717,55 +1687,7 @@ function installUpdate(){
         alert(T('MSG_LATEST_VERSION', awgCurrentVersion ? T('MSG_LATEST_VERSION_VER', awgCurrentVersion) : ''));
         return;
     }
-    closeUpdateModal();
-    doUpdate(awgLatestVersion || '');
-}
-
-// ---- Manual .ipk upload --------------------------------------------------------------
-// The firmware's apply path can't carry a multi-MB binary (httpd caps the POST body and
-// reads it line-by-line), so we base64-encode the file in the browser and stream it to
-// the router as a sequence of small custom-settings writes (awg_ipk_chunk). The backend
-// (awgupload event) appends each chunk by sequence number and acks via awg_upload.htm;
-// once every chunk is acked we trigger awgmanualinstall, which decodes, verifies
-// (length + gzip CRC + .ipk structure) and installs. A corrupt upload fails verification
-// and is never installed.
-var awgUploading = false;
-// Generation counter: bumped when a new upload starts and when the modal is closed.
-// Every poll/retry loop captures the generation it belongs to and stops itself once the
-// generation changes — so a stale loop from a previous or aborted upload can never drive
-// the UI (e.g. reload the page mid-install on a quick retry).
-var awgRun = 0;
-function awgStale(runId){ return runId !== awgRun; }
-
-function awgManualUI(show){
-    var p = document.getElementById('awg_manual_progress');
-    if(p) p.style.display = show ? 'block' : 'none';
-}
-function awgSetProgress(frac, msg){
-    var bar = document.getElementById('awg_manual_bar');
-    var m = document.getElementById('awg_manual_msg');
-    if(bar) bar.style.width = Math.round(Math.max(0, Math.min(1, frac)) * 100) + '%';
-    if(m && msg != null) m.textContent = msg;
-}
-function awgManualEnd(uploading){
-    awgUploading = uploading;
-    var btn = document.getElementById('awg_install_btn');
-    if(btn){ btn.disabled = uploading; btn.value = uploading ? T('BTN_INSTALLING') : T('BTN_INSTALL'); }
-}
-function awgManualFail(msg){
-    awgManualEnd(false);
-    awgSetProgress(0, '');
-    awgManualUI(false);
-    alert(T('MSG_INSTALL_FAILED', msg));
-}
-
-// Encode a Uint8Array to base64 without blowing the call stack on large files.
-function awgBytesToB64(bytes){
-    var bin = '', step = 0x8000;
-    for(var i = 0; i < bytes.length; i += step){
-        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
-    }
-    return btoa(bin);
+    if(doUpdate(awgLatestVersion || '', true) !== false) closeUpdateModal();
 }
 
 // Single submit point for the shared form. The browser's "Save password?" prompt fires
@@ -1779,8 +1701,77 @@ function awgSubmitForm(){
     document.form.submit();
 }
 
+// ---- Firmware custom_settings limits (Asuswrt-Merlin httpd, every branch incl. gnuton) ----------
+// write_custom_settings(): snprintf(line, 3040, "%s %s\n") per key — a record over 3039 bytes is CUT
+//   and loses its '\n', so the NEXT key is glued onto it (the router's line reader then can't see it).
+// ej_get_custom_settings(): sscanf("%29s%*[ ]%2999s") — the page reads back at most 2999 bytes of a
+//   value (and cuts it at its first whitespace).
+// validate_apply(): amng_custom is declared CKN_STR8192 — a POST whose JSON exceeds 8192 bytes fails
+//   nvram_check and is DISCARDED WHOLE (syslog "nvram_check fail: nvram amng_custom over length"),
+//   while the service event still fires and the iframe still loads: nothing saved, no error.
+//   That 8 KB is shared with every other addon's keys. (The old ~50/64 KB budgets here were wrong.)
+var AWG_CS_VALUE_MAX = 2900;   // our per-value ceiling — same margin as the chunked initdata keys
+var AWG_CS_TOTAL_MAX = 8192;
+function awgUtf8Len(s){
+    s = String(s == null ? '' : s);
+    try { return unescape(encodeURIComponent(s)).length; } catch(e){ return s.length * 3; }
+}
+// Why `obj` can't be saved as-is — {key, len} for the first over-long value of OUR keys, or
+// {key:'', total} when the whole object is over the firmware's cap — or null when it fits.
+// Only OUR awg_* keys are length-checked: other addons' (and the server page's awgs_*) values
+// came through the firmware's own reader and are that page's business.
+function awgSettingsOverflow(obj, totalOnly){
+    for(var k in obj){
+        if(totalOnly) break;
+        if(!obj.hasOwnProperty(k) || k.indexOf('awg_') !== 0) continue;
+        var n = awgUtf8Len(obj[k]);
+        var cap = /^awg_(geo_|antifilter)/.test(k) ? AWG_CS_VALUE_MAX : Math.min(2999, 3037 - k.length);
+        if(n > cap) return { key: k, len: n, cap: cap };
+    }
+    var total = awgUtf8Len(JSON.stringify(obj));
+    return total > AWG_CS_TOTAL_MAX ? { key: '', total: total } : null;
+}
+// A human message for awgSettingsOverflow's result, naming the field (and geo tab) when possible.
+function awgOverflowMsg(o){
+    if(!o.key) return T('MSG_SETTINGS_TOO_BIG', o.total, AWG_CS_TOTAL_MAX);
+    var m = /^awg_geo_(?:(\d+)_)?(v2fly|v2fly_ip|custom_domains|custom_ips|custom_files|custom_urls|exc_domains|exc_ips|exc_files|exc_urls)$/.exec(o.key), label = o.key;
+    var cap = o.cap || AWG_CS_VALUE_MAX;
+    if(m){
+        var id = m[1] ? parseInt(m[1], 10) : 1, gi = geoPolicyIndexById(id);
+        var tab = gi !== -1 ? geoDecodeName(geoPolicies[gi].name) : String(id);
+        if(m[2] === 'custom_files' || m[2] === 'exc_files')
+            return T('MSG_GEO_FILES_TOO_BIG', m[2] === 'exc_files' ? T('GEO_FILES_EXC_SUFFIX') : '', tab, o.len, cap);
+        var lk = { custom_domains:'TH_CUSTOM_DOMAINS', exc_domains:'TH_CUSTOM_DOMAINS', custom_ips:'TH_CUSTOM_IPS',
+                   exc_ips:'TH_CUSTOM_IPS', custom_urls:'TH_GEO_URLS', exc_urls:'TH_GEO_URLS',
+                   v2fly:'TH_GEOSITE_LISTS', v2fly_ip:'TH_GEOIP_LISTS' }[m[2]];
+        label = (lk ? T(lk) : o.key) + (m[2].indexOf('exc_') === 0 ? T('GEO_FILES_EXC_SUFFIX') : '') + ' — ' + tab;
+    } else {
+        var am = /^awg_antifilter(?:_(\d+))?_lists$/.exec(o.key);
+        if(am){
+            var ai = geoPolicyIndexById(am[1] ? parseInt(am[1], 10) : 1);
+            label = T('TH_ANTIFILTER_IP') + ' — ' + (ai !== -1 ? geoDecodeName(geoPolicies[ai].name) : (am[1] || '1'));
+        } else if(o.key === 'awg_clients') label = T('TBL_ROUTING_POLICY');
+        else if(/^awg_(?:pf\d+_)?peer_allowedips$/.test(o.key)) label = T('TH_ALLOWED_IPS');
+        else if(o.key === 'awg_watchdog_hosts') label = T('TH_TUNNEL_CHECK_ADDR');
+    }
+    return T('MSG_SETTING_TOO_LONG', label, o.len, cap);
+}
+// Deep-enough copy of custom_settings (flat string map) to roll back a refused save: applyConfig
+// and updateGeoLists write their values into the object BEFORE the store-limit check, and a
+// refused value left behind would ride along on the next path that posts the object.
+function awgSettingsSnapshot(){
+    var c = {};
+    for(var k in custom_settings){ if(custom_settings.hasOwnProperty(k)) c[k] = custom_settings[k]; }
+    return c;
+}
+function awgSettingsRestore(snap){
+    var k;
+    for(k in custom_settings){ if(custom_settings.hasOwnProperty(k)) delete custom_settings[k]; }
+    for(k in snap){ if(snap.hasOwnProperty(k)) custom_settings[k] = snap[k]; }
+}
+
 // Submit the shared form (-> hidden_frame, proven auth path) with the current settings
-// plus one-shot upload keys in `extra`. cb() fires when the POST has been processed.
+// plus optional one-shot keys in `extra`. cb() fires when the POST has been processed.
 function awgPostSettings(actionScript, extra, waitVal, cb){
     var fr = document.getElementById('hidden_frame');
     var done = false;
@@ -1789,11 +1780,18 @@ function awgPostSettings(actionScript, extra, waitVal, cb){
     function onl(){ if(done) return; done = true; cleanup(); cb(true); }
     fr.addEventListener('load', onl);
 
-    var merged = {};
-    for(var k in custom_settings){ if(custom_settings.hasOwnProperty(k)) merged[k] = custom_settings[k]; }
-    if(extra){ for(var k2 in extra){ if(extra.hasOwnProperty(k2)) merged[k2] = extra[k2]; } }
+    // extra === false: an action with no settings intent — post an EMPTY amng_custom, so the
+    // firmware writes nothing (re-posting the page-load snapshot would revert changes made
+    // elsewhere since, and an over-limit object would be discarded anyway). See awgAction.
     var ac = document.getElementById('amng_custom');
-    if(ac) ac.value = JSON.stringify(merged);
+    if(extra === false){
+        if(ac) ac.value = '';
+    } else {
+        var merged = {};
+        for(var k in custom_settings){ if(custom_settings.hasOwnProperty(k)) merged[k] = custom_settings[k]; }
+        if(extra){ for(var k2 in extra){ if(extra.hasOwnProperty(k2)) merged[k2] = extra[k2]; } }
+        if(ac) ac.value = JSON.stringify(merged);
+    }
 
     var aw = document.form.action_wait;
     var oldwait = aw ? aw.value : null;
@@ -1801,131 +1799,6 @@ function awgPostSettings(actionScript, extra, waitVal, cb){
     document.form.action_script.value = actionScript;
     awgSubmitForm();
     if(aw && oldwait != null) aw.value = oldwait;   // submit() snapshots fields synchronously
-}
-
-// Poll awg_upload.htm until the backend acks sequence `wantSeq` for this upload `token`.
-// cb(ackObjOrNull): {status:'ok'} on success; {status:'gap'|'err'} is a hard failure;
-// null on timeout (caller retries). Acks from other uploads (token mismatch) are ignored.
-function awgPollAck(token, wantSeq, timeoutMs, runId, cb){
-    var t0 = Date.now();
-    (function tick(){
-        if(awgStale(runId)) return;   // a newer upload (or close) superseded this one
-        var x = new XMLHttpRequest();
-        x.open('GET', '/user/awg_upload.htm?_=' + Date.now(), true);
-        x.timeout = 3000;
-        x.onload = function(){
-            if(awgStale(runId)) return;
-            var j = null;
-            try { j = JSON.parse(x.responseText); } catch(e){}
-            if(j && j.tok === token){
-                if(j.status === 'ok' && j.seq === wantSeq){ cb(j); return; }
-                if(j.status === 'gap' || j.status === 'err'){ cb(j); return; }
-            }
-            if(Date.now() - t0 > timeoutMs){ cb(null); return; }
-            setTimeout(tick, 300);
-        };
-        x.onerror = x.ontimeout = function(){
-            if(awgStale(runId)) return;
-            if(Date.now() - t0 > timeoutMs){ cb(null); return; }
-            setTimeout(tick, 400);
-        };
-        x.send();
-    })();
-}
-
-function awgManualStart(file){
-    var myRun = ++awgRun;   // claim a new generation; supersedes any prior upload's loops
-    awgManualEnd(true);
-    awgManualUI(true);
-    awgSetProgress(0, T('UP_READING_FILE'));
-
-    var reader = new FileReader();
-    reader.onerror = function(){ awgManualFail(T('UP_READ_FAILED')); };
-    reader.onload = function(){
-        var bytes = new Uint8Array(reader.result);
-        var total = bytes.length;
-        if(total === 0){ awgManualFail(T('UP_FILE_EMPTY')); return; }
-        var b64 = awgBytesToB64(bytes);
-
-        // Size each chunk so the whole POST (current settings + chunk, URL-encoded) stays
-        // well under the firmware's ~64 KB body cap. If the existing settings alone are
-        // already too big, bail out cleanly rather than send a silently-truncated POST.
-        var baseLen = encodeURIComponent(JSON.stringify(custom_settings)).length;
-        // -256: the "amng_custom=" prefix, the other form fields, and the chunk key names
-        // (awg_ipk_chunk/seq/token/first) that ride along in the same POST body.
-        var budget = 52000 - baseLen - 256;
-        if(budget < 2000){ awgManualFail(T('UP_SETTINGS_TOO_BIG')); return; }
-        var chunkChars = Math.floor(budget / 1.06);
-        var total_chunks = Math.ceil(b64.length / chunkChars);
-        var token = 'u' + Date.now() + Math.floor(Math.random() * 1e9).toString(36);
-
-        function sendChunk(i){
-            if(awgStale(myRun)) return;
-            if(i >= total_chunks){ triggerInstall(); return; }
-            var piece = b64.substr(i * chunkChars, chunkChars);
-            var extra = { awg_ipk_chunk: piece, awg_ipk_seq: String(i), awg_ipk_token: token };
-            if(i === 0) extra.awg_ipk_first = '1';
-            attemptChunk(i, extra, 0);
-        }
-        function attemptChunk(i, extra, attempt){
-            if(awgStale(myRun)) return;
-            awgSetProgress(i / total_chunks, T('UP_PROGRESS', i + 1, total_chunks));
-            awgPostSettings('start_awgupload', extra, 1, function(){
-                awgPollAck(token, i, 15000, myRun, function(ack){
-                    if(ack && ack.status === 'ok'){ sendChunk(i + 1); return; }
-                    if(ack && (ack.status === 'gap' || ack.status === 'err')){
-                        awgManualFail((ack.code ? awgErrText(ack.code) + ' ' : (ack.msg ? ack.msg + ' ' : T('UP_TRANSFER_FAILED'))) + T('UP_PART', i + 1, total_chunks));
-                        return;
-                    }
-                    if(attempt < 4){ attemptChunk(i, extra, attempt + 1); return; }   // timeout -> retry
-                    awgManualFail(T('UP_NO_ROUTER_RESPONSE', i + 1, total_chunks));
-                });
-            });
-        }
-        function triggerInstall(){
-            if(awgStale(myRun)) return;
-            awgSetProgress(1, T('UP_VERIFYING'));
-            awgPostSettings('start_awgmanualinstall', { awg_ipk_len: String(total), awg_ipk_token: token }, 30, function(){
-                awgPollManualInstall(token, myRun);
-            });
-        }
-
-        awgSetProgress(0, T('UP_PROGRESS', 1, total_chunks));
-        sendChunk(0);
-    };
-    reader.readAsArrayBuffer(file);
-}
-
-// After awgmanualinstall is triggered, poll awg_upload.htm for the final result. Both the
-// generation (runId) and the per-upload token are checked, so a leaked poller can never
-// act on another upload's completion.
-function awgPollManualInstall(token, runId){
-    var t0 = Date.now();
-    (function tick(){
-        if(awgStale(runId)) return;
-        var x = new XMLHttpRequest();
-        x.open('GET', '/user/awg_upload.htm?_=' + Date.now(), true);
-        x.timeout = 3000;
-        x.onload = function(){
-            if(awgStale(runId)) return;
-            var j = null;
-            try { j = JSON.parse(x.responseText); } catch(e){}
-            if(j && j.tok === token && j.status === 'installed'){
-                awgSetProgress(1, T('UP_DONE_RELOADING'));
-                setTimeout(awgReload, 1500);
-                return;
-            }
-            if(j && j.tok === token && j.status === 'install_err'){ awgManualFail(j.code ? awgErrText(j.code) : T('UP_INSTALL_FAILED')); return; }
-            if(Date.now() - t0 > 180000){ awgManualEnd(false); awgReload(); return; }
-            setTimeout(tick, 2000);
-        };
-        x.onerror = x.ontimeout = function(){
-            if(awgStale(runId)) return;
-            if(Date.now() - t0 > 180000){ awgManualEnd(false); awgReload(); return; }
-            setTimeout(tick, 2500);
-        };
-        x.send();
-    })();
 }
 
 // Load the changelog straight from the repo, fetched by the frontend. Use the
@@ -2311,7 +2184,9 @@ function pfSwitch(n){
     var prev = custom_settings.awg_profile_active;
     custom_settings.awg_profile_active = String(n);
     awgPfSwitchTo = n;
-    if(!applyConfig('start_awgswitch')) custom_settings.awg_profile_active = prev;
+    if(!applyConfig('start_awgswitch')){
+        if(prev === undefined) delete custom_settings.awg_profile_active; else custom_settings.awg_profile_active = prev;
+    }
     awgPfSwitchTo = 0;
 }
 
@@ -2404,9 +2279,11 @@ function updateFirstRun(){
 }
 
 function applyConfig(actionScript){
+    // Every refusal below rolls custom_settings back to this snapshot (awgSettingsSnapshot).
+    var snap = awgSettingsSnapshot(), pfSnap = awgPfSnapshot;
     // Serialize the config form into the profile slot it edits (field validation + the
     // per-slot chunked I1-I5 initdata live inside; a blocked save also blocks the submit).
-    if(!pfStoreForm(awgPfSel)) return false;
+    if(!pfStoreForm(awgPfSel)){ awgSettingsRestore(snap); awgPfSnapshot = pfSnap; return false; }
     // Profile bar state (names, per-slot failover flags, the global toggle) rides along.
     pfHarvestBar();
 
@@ -2418,7 +2295,7 @@ function applyConfig(actionScript){
     // legacy unsuffixed keys (id 1) / id-suffixed keys (id>=2), plus the awg_geo_policies
     // registry. geoSerializePolicies captures the visible tab first and validates the files
     // budget; bail (no submit) if it's exceeded.
-    if(!geoSerializePolicies()) return false;
+    if(!geoSerializePolicies()){ awgSettingsRestore(snap); awgPfSnapshot = pfSnap; return false; }
     custom_settings.awg_geo_autoupdate = document.getElementById('geo_autoupdate').checked ? '1' : '0';
     custom_settings.awg_block_ipv6_dns = document.getElementById('awg_block_ipv6_dns').checked ? '1' : '0';
     custom_settings.awg_no_dns_intercept = document.getElementById('awg_no_dns_intercept').checked ? '1' : '0';
@@ -2447,13 +2324,15 @@ function applyConfig(actionScript){
     // (Antifilter lists are saved per-policy by geoSerializePolicies above.)
     // (Per-field validation of the config form ran inside pfStoreForm above.)
 
-    // Whole-store size guard: the page POSTs the ENTIRE custom_settings object and the
-    // firmware caps one request body at ~64 KB (we budget 52000 URL-encoded, like the .ipk
-    // uploader) — 5 profiles with huge I1-I5 junk blobs can genuinely reach it. Refuse with
-    // a named cause instead of letting the firmware truncate the store silently.
-    var postLen = encodeURIComponent(JSON.stringify(custom_settings)).length;
-    if(postLen > 50000){
-        alert(T('MSG_SETTINGS_TOO_BIG', Math.round(postLen / 1024)));
+    // Store-limit guard (see AWG_CS_*): the page POSTs the ENTIRE custom_settings object, and
+    // the firmware silently cuts any value over ~3000 bytes (gluing the next key onto it) and
+    // discards the WHOLE save when the JSON is over 8192 bytes — while the page used to show
+    // «Saved». Refuse with a named cause instead.
+    var ovf = awgSettingsOverflow(custom_settings);
+    if(ovf){
+        awgSettingsRestore(snap);
+        awgPfSnapshot = pfSnap;   // the edits are still unsaved: keep the switch-away prompt armed
+        alert(awgOverflowMsg(ovf));
         return false;
     }
 
@@ -2663,6 +2542,8 @@ function geoCaptureActive(){
     p.excIps = awgCsv('geo_exc_ips');
     p.excFiles = serializeGeoFiles('exc');
     p.excUrls = serializeGeoUrls('exc');
+    // The rows now hold what survived (partial line already dropped at render): nothing is "cut" anymore.
+    p.filesCut = p.excFilesCut = p.urlsCut = p.excUrlsCut = false;
 }
 // Render the active policy object into the visible panel fields.
 function geoRenderActive(){
@@ -2673,8 +2554,8 @@ function geoRenderActive(){
     set('awg_geo_v2fly', p.v2fly);
     set('geo_custom_domains', p.customDomains);
     set('geo_custom_ips', p.customIps);
-    loadGeoFiles(p.files);
-    loadGeoUrls(p.urls);
+    loadGeoFiles(p.files, '', p.filesCut);
+    loadGeoUrls(p.urls, '', p.urlsCut);
     var sel = (p.antifilter || '').split(','), boxes = document.querySelectorAll('.af_list');
     for(var i=0;i<boxes.length;i++) boxes[i].checked = sel.indexOf(boxes[i].value) !== -1;
     // Mode (include/exclude) + exclusions block.
@@ -2683,8 +2564,8 @@ function geoRenderActive(){
     if(mr) mr.checked = true;
     set('geo_exc_domains', p.excDomains);
     set('geo_exc_ips', p.excIps);
-    loadGeoFiles(p.excFiles, 'exc');
-    loadGeoUrls(p.excUrls, 'exc');
+    loadGeoFiles(p.excFiles, 'exc', p.excFilesCut);
+    loadGeoUrls(p.excUrls, 'exc', p.excUrlsCut);
     updateGeoModeHint();
 }
 // Swap the mode hint text to match the selected include/exclude radio.
@@ -2797,57 +2678,118 @@ function geoHydratePolicies(){
             customDomains: custom_settings[geoKeyJs(pid,'custom_domains')] || '',
             customIps: custom_settings[geoKeyJs(pid,'custom_ips')] || '',
             files: custom_settings[geoKeyJs(pid,'custom_files')] || '',
-            urls: custom_settings[geoKeyJs(pid,'custom_urls')] || '',
+            urls: geoNormUrlsB64(custom_settings[geoKeyJs(pid,'custom_urls')] || ''),
+            // The firmware reader returns at most 2999 bytes of a value: at that length it was cut.
+            filesCut: (custom_settings[geoKeyJs(pid,'custom_files')] || '').length >= 2999,
+            urlsCut: (custom_settings[geoKeyJs(pid,'custom_urls')] || '').length >= 2999,
+            excFilesCut: (custom_settings[geoKeyJs(pid,'exc_files')] || '').length >= 2999,
+            excUrlsCut: (custom_settings[geoKeyJs(pid,'exc_urls')] || '').length >= 2999,
             antifilter: custom_settings[geoKeyJs(pid,'antifilter_lists')] || '',
             mode: (custom_settings[geoKeyJs(pid,'mode')] === 'direct') ? 'direct' : 'vpn',
             excDomains: custom_settings[geoKeyJs(pid,'exc_domains')] || '',
             excIps: custom_settings[geoKeyJs(pid,'exc_ips')] || '',
             excFiles: custom_settings[geoKeyJs(pid,'exc_files')] || '',
-            excUrls: custom_settings[geoKeyJs(pid,'exc_urls')] || ''
+            excUrls: geoNormUrlsB64(custom_settings[geoKeyJs(pid,'exc_urls')] || '')
         });
     }
     geoActiveIdx = 0;
 }
-// Serialize geoPolicies[] back into custom_settings; returns false if the files budget is blown.
+// First URL in a stored custom_urls/exc_urls value (base64 of \n-joined URLs) that the backend
+// would ignore — it fetches only http(s):// links — or '' when all are fine.
+function geoBadUrl(b64){
+    var txt = '';
+    try { txt = decodeURIComponent(escape(atob(b64 || ''))); } catch(e){ return ''; }
+    var a = txt.split('\n');
+    for(var i = 0; i < a.length; i++){
+        var u = a[i].replace(/\s+/g, '');
+        if(u && !/^https?:\/\/([^\/?#@]*@)?([A-Za-z0-9._~%-]+|\[[0-9A-Fa-f:.]+\])(:\d+)?([\/?#]|$)/.test(u)) return u;
+    }
+    return '';
+}
+// Normalize one URL the way the backend fetches (lowercase http(s):// scheme): "HTTPS://x" is
+// lowercased and a bare "example.com/list.txt" (or host:port/...) gets https://. Anything else
+// that looks like a scheme or a local path — "mailto:", "C:\…", "http:/x" — is left as typed so
+// geoBadUrl names it instead of it turning into a bogus https:// "host".
+function geoNormUrl(u){
+    u = String(u || '').replace(/\s+/g, '');
+    if(!u) return '';
+    var sm = /^([a-z][a-z0-9+.-]*):\/\//i.exec(u);
+    if(sm) return sm[1].toLowerCase() + u.slice(sm[1].length);
+    if(/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(u) || u.indexOf('\\') !== -1) return u;
+    return 'https://' + u.replace(/^\/+/, '');
+}
+// geoNormUrl over a stored custom_urls/exc_urls value (base64 of \n-joined URLs), so a legacy
+// "HTTPS://…" on a tab that is never opened is not refused as bad on the next Apply.
+function geoNormUrlsB64(b64){
+    if(!b64) return '';
+    var txt;
+    try { txt = decodeURIComponent(escape(atob(b64))); } catch(e){ return b64; }
+    var a = txt.split('\n'), out = [], ch = false;
+    for(var i = 0; i < a.length; i++){
+        var n = geoNormUrl(a[i]);
+        if(n !== a[i]) ch = true;
+        if(n) out.push(n);
+    }
+    if(!ch) return b64;
+    try { return btoa(unescape(encodeURIComponent(out.join('\n')))); } catch(e){ return b64; }
+}
+// Serialize geoPolicies[] back into custom_settings; returns false (after telling the user and
+// showing the offending tab) when a policy's files can't fit the firmware store or a URL is bad.
 function geoSerializePolicies(){
     geoCaptureActive();
-    var totalFiles = 0, gp, p, suf, si;
+    var gp, p, suf, si, bad;
     var sufs = ['v2fly','v2fly_ip','custom_domains','custom_ips','custom_files','custom_urls','antifilter_lists',
                 'mode','exc_domains','exc_ips','exc_files','exc_urls'];
+    // Files are stored as ONE settings value per tab and channel, and the firmware cuts a value
+    // at ~3000 bytes (see AWG_CS_*): refuse here, naming the tab, instead of saving a list that
+    // comes back cut mid-line (the pre-1.5.24 «files don't save» report).
     for(gp=0; gp<geoPolicies.length; gp++){
         p = geoPolicies[gp];
-        totalFiles += (p.files || '').length + (p.excFiles || '').length;
-        custom_settings[geoKeyJs(p.id,'v2fly')] = p.v2fly || '';
-        custom_settings[geoKeyJs(p.id,'v2fly_ip')] = p.v2flyIp || '';
-        custom_settings[geoKeyJs(p.id,'custom_domains')] = p.customDomains || '';
-        custom_settings[geoKeyJs(p.id,'custom_ips')] = p.customIps || '';
-        custom_settings[geoKeyJs(p.id,'custom_files')] = p.files || '';
-        custom_settings[geoKeyJs(p.id,'custom_urls')] = p.urls || '';
-        custom_settings[geoKeyJs(p.id,'antifilter_lists')] = p.antifilter || '';
-        custom_settings[geoKeyJs(p.id,'mode')] = (p.mode === 'direct') ? 'direct' : 'vpn';
-        custom_settings[geoKeyJs(p.id,'exc_domains')] = p.excDomains || '';
-        custom_settings[geoKeyJs(p.id,'exc_ips')] = p.excIps || '';
-        custom_settings[geoKeyJs(p.id,'exc_files')] = p.excFiles || '';
-        custom_settings[geoKeyJs(p.id,'exc_urls')] = p.excUrls || '';
+        var fl = [[p.files, ''], [p.excFiles, T('GEO_FILES_EXC_SUFFIX')]];
+        for(si=0; si<fl.length; si++){
+            var n = awgUtf8Len(fl[si][0] || '');
+            if(n > AWG_CS_VALUE_MAX){
+                if(gp !== geoActiveIdx) geoSwitchTo(gp);
+                alert(T('MSG_GEO_FILES_TOO_BIG', fl[si][1], geoDecodeName(p.name), n, AWG_CS_VALUE_MAX));
+                return false;
+            }
+        }
+        bad = geoBadUrl(p.urls) || geoBadUrl(p.excUrls);
+        if(bad){
+            if(gp !== geoActiveIdx) geoSwitchTo(gp);
+            alert(T(/^https?:\/\/[^\/?#]*[^\x00-\x7f]/.test(bad) ? 'MSG_GEO_URL_IDN' : 'MSG_GEO_URL_BAD', geoDecodeName(p.name), bad));
+            return false;
+        }
+    }
+    // Empty fields are deleted rather than stored as '' (the page never reads an empty value back,
+    // the backend treats empty == missing, and every byte counts against the shared 8 KB cap);
+    // mode 'vpn' is the default on both sides, so only 'direct' is stored.
+    var put = function(k, v){ if(v) custom_settings[k] = v; else delete custom_settings[k]; };
+    for(gp=0; gp<geoPolicies.length; gp++){
+        p = geoPolicies[gp];
+        put(geoKeyJs(p.id,'v2fly'), p.v2fly);
+        put(geoKeyJs(p.id,'v2fly_ip'), p.v2flyIp);
+        put(geoKeyJs(p.id,'custom_domains'), p.customDomains);
+        put(geoKeyJs(p.id,'custom_ips'), p.customIps);
+        put(geoKeyJs(p.id,'custom_files'), p.files);
+        put(geoKeyJs(p.id,'custom_urls'), p.urls);
+        put(geoKeyJs(p.id,'antifilter_lists'), p.antifilter);
+        put(geoKeyJs(p.id,'mode'), (p.mode === 'direct') ? 'direct' : '');
+        put(geoKeyJs(p.id,'exc_domains'), p.excDomains);
+        put(geoKeyJs(p.id,'exc_ips'), p.excIps);
+        put(geoKeyJs(p.id,'exc_files'), p.excFiles);
+        put(geoKeyJs(p.id,'exc_urls'), p.excUrls);
     }
     custom_settings.awg_geo_policies = geoPolicies.map(function(x){ return x.id + ':' + x.name; }).join(';');
-    // Free the settings budget: blank keys of policies that existed at load but were removed.
+    // Free the settings budget: drop the keys of policies that existed at load but were removed.
     for(var li=0; li<geoLoadedIds.length; li++){
         var oid = geoLoadedIds[li];
         if(geoPolicyIndexById(oid) === -1){
-            for(si=0; si<sufs.length; si++) custom_settings[geoKeyJs(oid,sufs[si])] = '';
+            for(si=0; si<sufs.length; si++) delete custom_settings[geoKeyJs(oid,sufs[si])];
         }
     }
-    // Budget guard: across N policies the per-policy keys (domains/IPs/URLs/files/antifilter)
-    // add up, and Merlin silently truncates a POST body over ~64 KB. Check the WHOLE serialized
-    // store (not just files) against the same ~52000-char cap the upload path uses, so a stack
-    // of large lists across tabs can't corrupt settings on Apply. (Files keep their own message.)
-    if(totalFiles > 40000){ alert(T('MSG_GEO_FILES_TOO_BIG')); return false; }
-    try {
-        if(encodeURIComponent(JSON.stringify(custom_settings)).length > 50000){
-            alert(T('MSG_GEO_FILES_TOO_BIG')); return false;
-        }
-    } catch(e){}
+    // The whole-store limits (other long fields, the 8 KB total) are checked by the callers right
+    // before they POST, once every other setting has been folded in (awgSettingsOverflow).
     return true;
 }
 
@@ -2953,14 +2895,19 @@ function updateGeoLists(){
         msg += T('MSG_WIPE_BEFORE_UPDATE');
     }
     if(!confirm(msg)) return;
+    var snap = awgSettingsSnapshot();
     // Capture the geo policies (incl. a just-added tab + unsaved active-tab edits) into
     // custom_settings, so the backend downloads the CURRENT matrix, not the last-Applied one.
-    if(!geoSerializePolicies()) return;
+    if(!geoSerializePolicies()){ awgSettingsRestore(snap); return; }
+    // Carry the current "download via VPN" choice even without a prior Apply.
+    syncViaVpnToggles();
+    // Same store-limit guard as Apply: an over-limit POST is discarded whole by the firmware, and
+    // the backend would then download the PREVIOUS matrix while the page claims the new one.
+    var ovf = awgSettingsOverflow(custom_settings);
+    if(ovf){ awgSettingsRestore(snap); alert(awgOverflowMsg(ovf)); return; }
     var log = document.getElementById('awg_log');
     if(log) log.textContent = T('MSG_GEO_LOADING_WAIT');
     awgSetGeoBusy(true);
-    // Carry the current "download via VPN" choice even without a prior Apply.
-    syncViaVpnToggles();
     // NB this path DOES carry settings (see just above), so it must post the object. It
     // therefore still writes a page-load snapshot of everything ELSE — a known limitation of the
     // firmware's whole-object custom_settings API; only paths with no settings intent can clear.
@@ -3465,7 +3412,13 @@ function awgAnalyzeStart(){
     // NB this path DOES carry settings (see just above), so it must post the object. It
     // therefore still writes a page-load snapshot of everything ELSE — a known limitation of the
     // firmware's whole-object custom_settings API; only paths with no settings intent can clear.
+    var prevDev = custom_settings.awg_analyze_device;
     custom_settings.awg_analyze_device = awgAnalyzeIp;
+    var ovfA = awgSettingsOverflow(custom_settings, true);
+    if(ovfA){
+        if(prevDev === undefined) delete custom_settings.awg_analyze_device; else custom_settings.awg_analyze_device = prevDev;
+        alert(awgOverflowMsg(ovfA)); return;
+    }
     document.getElementById('amng_custom').value = JSON.stringify(custom_settings);
     document.form.action_script.value = 'start_awganalyzestart';
     awgSubmitForm();
@@ -4325,7 +4278,7 @@ function awgDisableCtf(btn){
     if(!confirm(T('CTF_DISABLE_CONFIRM'))) return;
     awgCtfDisabling = true;
     if(btn){ btn.disabled = true; btn.value = T('CTF_DISABLING'); }
-    awgPostSettings('start_awgctfdisable', null, 2, function(){});
+    awgPostSettings('start_awgctfdisable', false, 2, function(){});   // no settings to carry
 }
 
 // "Stop Xray": stop the co-resident XRAYUI through its OWN entry point (backend do_xray_stop ->
@@ -4445,7 +4398,7 @@ function awgStopXray(btn){
     if(!confirm(T('XRAY_STOP_CONFIRM'))) return;
     awgXrayStopping = true;
     if(btn){ btn.disabled = true; btn.value = T('XRAY_STOPPING'); }
-    awgPostSettings('start_awgxraystop', null, 2, function(){
+    awgPostSettings('start_awgxraystop', false, 2, function(){   // no settings to carry
         setTimeout(awgRefreshStatus, 2500);
         setTimeout(function(){ awgXrayStopping = false; awgRefreshStatus(); }, 6000);
     });
@@ -4670,7 +4623,9 @@ function awgCsv(id){
     return el ? String(el.value || '').replace(/["']/g, '').replace(/[\s,]+/g, ',').replace(/^,+|,+$/g, '') : '';
 }
 
-function addGeoFileRow(name, content, kind){
+// `warn` (optional): a notice shown under the textarea — set when the stored value came back cut
+// by the firmware (see loadGeoFiles); it clears as soon as the user edits the content.
+function addGeoFileRow(name, content, kind, warn){
     var tbody = document.getElementById(kind === 'exc' ? 'awg_exc_files_rows' : 'awg_geo_files_rows');
     if(!tbody) return;
     var tr = document.createElement('tr');
@@ -4682,10 +4637,15 @@ function addGeoFileRow(name, content, kind){
                 '<input type="button" class="button_gen" value="✕" title="' + escHtml(T('BTN_REMOVE')) + '" aria-label="' + escHtml(T('BTN_REMOVE')) + '" onclick="removeGeoRow(this);" style="padding:2px 9px;">' +
             '</div>' +
             '<textarea class="geo_file_content awg-geo-ta" rows="3" placeholder="example.com&#10;1.2.3.0/24" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>' +
+            (warn ? '<div class="awg-hint geo_file_warn" style="color:#ffcc00;">' + escHtml(warn) + '</div>' : '') +
         '</td>';
     tbody.appendChild(tr);
     var ta = tr.querySelector('.geo_file_content');
-    if(ta) ta.value = content || '';   // set via .value so content isn't HTML-parsed
+    if(ta){
+        ta.value = content || '';   // set via .value so content isn't HTML-parsed
+        if(warn) ta.addEventListener('input', function(){ var w = tr.querySelector('.geo_file_warn'); if(w) w.style.display = 'none'; tr.removeAttribute('data-raw'); });
+    }
+    return tr;
 }
 
 function addGeoUrlRow(url, kind){
@@ -4699,7 +4659,7 @@ function addGeoUrlRow(url, kind){
                 '<input type="button" class="button_gen" value="✕" title="' + escHtml(T('BTN_REMOVE')) + '" aria-label="' + escHtml(T('BTN_REMOVE')) + '" onclick="removeGeoRow(this);" style="padding:2px 9px;">' +
             '</div>' +
         '</td>';
-    tbody.appendChild(tr);
+    tbody.insertBefore(tr, tbody.querySelector('tr.geo_url_warn'));   // above a "cut" warning row, if any
 }
 
 function removeGeoRow(btn){
@@ -4714,7 +4674,7 @@ function geoFileLoad(btn){
     if(!row) return;
     var fi = document.createElement('input');
     fi.type = 'file';
-    fi.accept = '.txt,.lst,.conf,.csv';
+    fi.accept = '.txt,.lst,.list,.cidr,.conf,.csv,text/plain';
     fi.style.display = 'none';
     document.body.appendChild(fi);
     fi.onchange = function(){
@@ -4724,6 +4684,8 @@ function geoFileLoad(btn){
             reader.onload = function(e){
                 var ta = row.querySelector('.geo_file_content');
                 if(ta) ta.value = String(e.target.result || '');
+                var w = row.querySelector('.geo_file_warn'); if(w) w.style.display = 'none';
+                row.removeAttribute('data-raw');
                 var nm = row.querySelector('.geo_file_name');
                 if(nm && !nm.value){ nm.value = sanitizeGeoName(f.name.replace(/\.[^.]*$/, '')); }
             };
@@ -4736,14 +4698,22 @@ function geoFileLoad(btn){
 
 function serializeGeoFiles(kind){
     var rows = document.querySelectorAll('#' + (kind === 'exc' ? 'awg_exc_files_rows' : 'awg_geo_files_rows') + ' tr');
-    var parts = [];
+    var parts = [], used = {}, j;
+    for(j = 0; j < rows.length; j++){
+        var un = rows[j].querySelector('.geo_file_name');
+        if(un && un.value) used[sanitizeGeoName(un.value)] = true;
+    }
     for(var i = 0; i < rows.length; i++){
         var nmEl = rows[i].querySelector('.geo_file_name');
         var ctEl = rows[i].querySelector('.geo_file_content');
         if(!nmEl || !ctEl) continue;
         var name = sanitizeGeoName(nmEl.value);
         var content = ctEl.value;
-        if(!name || !content.replace(/\s+/g, '')) continue;   // skip nameless/empty rows
+        var raw = rows[i].getAttribute('data-raw');
+        if(raw && name && !content){ parts.push(name + ',' + raw); continue; }   // damaged, untouched: keep as stored
+        if(!content.replace(/\s+/g, '')) continue;   // skip empty rows
+        // A pasted list without a name used to be dropped SILENTLY on save — name it instead.
+        if(!name){ for(j = 1; used['file' + j]; j++){} name = 'file' + j; used[name] = true; nmEl.value = name; }
         var b64;
         try { b64 = btoa(unescape(encodeURIComponent(content))); } catch(e){ continue; }
         parts.push(name + ',' + b64);
@@ -4755,43 +4725,102 @@ function serializeGeoUrls(kind){
     var inputs = document.querySelectorAll('#' + (kind === 'exc' ? 'awg_exc_url_rows' : 'awg_geo_url_rows') + ' .geo_url');
     var urls = [];
     for(var i = 0; i < inputs.length; i++){
-        var u = String(inputs[i].value || '').replace(/\s+/g, '');
-        if(u) urls.push(u);
+        // Normalize what the backend accepts (it fetches only lowercase-scheme http(s)://): a bare
+        // "example.com/list.txt" gets https://, "HTTPS://" is lowercased. Both used to be dropped
+        // by the router without a word. Written back so the user sees what will be fetched.
+        var u = geoNormUrl(inputs[i].value);
+        if(!u) continue;
+        if(inputs[i].value !== u) inputs[i].value = u;
+        urls.push(u);
     }
     if(!urls.length) return '';
     try { return btoa(unescape(encodeURIComponent(urls.join('\n')))); } catch(e){ return ''; }
 }
 
-function loadGeoFiles(data, kind){
+function loadGeoFiles(data, kind, cut){
     var tbody = document.getElementById(kind === 'exc' ? 'awg_exc_files_rows' : 'awg_geo_files_rows');
     if(!tbody) return;
     tbody.innerHTML = '';
     if(data == null) data = custom_settings.awg_geo_custom_files || '';
     if(!data) return;
-    var entries = data.split(';');
-    for(var i = 0; i < entries.length; i++){
+    // A value at the firmware reader's 2999-byte cap was CUT (see AWG_CS_*): its last file lost
+    // its tail, usually mid-line, and any files after it are gone. atob used to throw on that
+    // (for some name lengths) and the row came back EMPTY — the next Apply then dropped the file
+    // for good; for other lengths the half-line was re-saved as data ("…/24" cut to "/2" = a
+    // quarter of IPv4). Decode what survived, drop the partial line, and say so on the row.
+    // `cut` comes from the STORED value (geoHydratePolicies): rows re-rendered from unsaved edits
+    // must never be cut again. If the cut fell inside a following file's name, that file is gone:
+    // the warning then goes on the last row shown.
+    var entries = data.split(';'), last = -1, i, shown = null;
+    for(i = 0; i < entries.length; i++) if(entries[i]) last = i;
+    var tailcut = !!cut && /[;=]$/.test(data);
+    if(tailcut) cut = false;
+    for(i = 0; i < entries.length; i++){
         if(!entries[i]) continue;
         var ci = entries[i].indexOf(',');
-        if(ci < 0) continue;
-        var name = entries[i].slice(0, ci);
-        var content = '';
-        try { content = decodeURIComponent(escape(atob(entries[i].slice(ci + 1)))); } catch(e){ content = ''; }
-        addGeoFileRow(name, content, kind);
+        if(ci < 0 || ci === 0){
+            if(cut && i === last && shown){ var sw = shown.querySelector('.geo_file_warn'); if(!sw) addGeoFileWarn(shown, T('GEO_FILE_CUT')); }
+            continue;
+        }
+        var name = entries[i].slice(0, ci), b64 = entries[i].slice(ci + 1);
+        var content = '', warn = '', raw = '';
+        if(cut && i === last){
+            content = geoB64DecodeLoose(b64).replace(/\n?[^\n]*$/, '');
+            warn = T('GEO_FILE_CUT');
+        } else if(tailcut && i === last){
+            content = geoB64DecodeLoose(b64);
+        } else {
+            try { content = decodeURIComponent(escape(atob(b64))); } catch(e){ content = ''; warn = T('GEO_FILE_UNREADABLE'); raw = b64; }
+        }
+        shown = addGeoFileRow(name, content, kind, warn);
+        if(raw && shown) shown.setAttribute('data-raw', raw);
     }
+    if(tailcut && shown && !shown.querySelector('.geo_file_warn')) addGeoFileWarn(shown, T('GEO_FILE_CUT'));
+}
+// Put a warning line under an existing file row (used when the file after it was cut away).
+function addGeoFileWarn(tr, msg){
+    var td = tr.querySelector('td'); if(!td) return;
+    var d = document.createElement('div');
+    d.className = 'awg-hint geo_file_warn'; d.style.color = '#ffcc00'; d.textContent = msg;
+    td.appendChild(d);
+}
+// Decode as much of a (possibly truncated) base64 UTF-8 text as survives — the backend b64d rule:
+// stray characters dropped, the stream ends at its first '=', padding repaired (a 2/3-char tail
+// gets its '='s back — a cut between the two '=' loses nothing; a lone 1-char tail is dropped),
+// and a multi-byte character split by the cut is trimmed.
+function geoB64DecodeLoose(b64){
+    b64 = String(b64 || '').replace(/[^A-Za-z0-9+\/=]/g, '');
+    var eq = b64.indexOf('='); if(eq !== -1) b64 = b64.slice(0, eq);
+    var r = b64.length % 4;
+    if(r === 1) b64 = b64.slice(0, -1); else if(r) b64 += (r === 2 ? '==' : '=');
+    var bin = '';
+    try { bin = atob(b64); } catch(e){ return ''; }
+    for(var k = 0; k < 4 && k <= bin.length; k++){
+        try { return decodeURIComponent(escape(bin.slice(0, bin.length - k))); } catch(e){}
+    }
+    return '';
 }
 
-function loadGeoUrls(data, kind){
+function loadGeoUrls(data, kind, cut){
     var tbody = document.getElementById(kind === 'exc' ? 'awg_exc_url_rows' : 'awg_geo_url_rows');
     if(!tbody) return;
     tbody.innerHTML = '';
     if(data == null) data = custom_settings.awg_geo_custom_urls || '';
     if(!data) return;
     var txt = '';
-    try { txt = decodeURIComponent(escape(atob(data))); } catch(e){ txt = ''; }
+    // A value the firmware cut (flag from geoHydratePolicies) keeps all but its partial last URL.
+    if(cut) txt = geoB64DecodeLoose(data).replace(/\n?[^\n]*$/, '');
+    else { try { txt = decodeURIComponent(escape(atob(data))); } catch(e){ txt = geoB64DecodeLoose(data); } }
     var urls = txt.split('\n');
     for(var i = 0; i < urls.length; i++){
         var u = urls[i].replace(/\s+/g, '');
         if(u) addGeoUrlRow(u, kind);
+    }
+    if(cut){
+        var wtr = document.createElement('tr');
+        wtr.className = 'geo_url_warn';
+        wtr.innerHTML = '<td><div class="awg-hint" style="color:#ffcc00;">' + escHtml(T('GEO_URLS_CUT')) + '</div></td>';
+        tbody.appendChild(wtr);
     }
 }
 
@@ -5462,7 +5491,7 @@ function initAutocompleteIp(){
                     </td>
                 </tr>
                 <tr><td colspan="2">
-                    <div class="awg-hint" data-i18n-html="HINT_GEO_CUSTOM_FORMAT">One entry per line. A domain (<code>example.com</code>) is routed via DNS; an IP or CIDR subnet (<code>1.2.3.0/24</code>) is added to the ipset. Lines starting with <code>#</code> are comments. A URL must return a plain-text list in this format.</div>
+                    <div class="awg-hint" data-i18n-html="HINT_GEO_CUSTOM_FORMAT">One entry per line. A domain (<code>example.com</code>) is routed via DNS; an IPv4 address or CIDR subnet (<code>1.2.3.0/24</code>) is added to the ipset (IPv6 is skipped). Text after <code>#</code> is a comment. A URL must return a plain-text list in this format. Files live inside the firmware's settings store, which holds only <b>about 2 KB of text per tab (~150 lines)</b> — put a bigger list online (e.g. a GitHub raw link) and add it as a URL source: those have no size limit.</div>
 
                     <div style="margin-top:8px; font-weight:bold; font-size:12px;" data-i18n="TH_GEO_FILES">Custom files</div>
                     <table width="100%" border="0" cellpadding="0" cellspacing="0" style="table-layout:fixed;"><tbody id="awg_geo_files_rows"></tbody></table>
@@ -5619,18 +5648,12 @@ function initAutocompleteIp(){
             <select id="awg_install_mode" onchange="awgModeUI();" class="awg-modal-input" aria-label="Install method" data-i18n-aria="ARIA_INSTALL_MODE">
                 <option value="auto" data-i18n="OPT_INSTALL_AUTO">Automatic (latest)</option>
                 <option value="version" data-i18n="OPT_INSTALL_VERSION">Choose version</option>
-                <option value="file" data-i18n="OPT_INSTALL_FILE">Manually from file</option>
+                <option value="file" data-i18n="OPT_INSTALL_FILE">From a local file (over SSH)</option>
             </select>
             <input type="text" id="awg_version_input" placeholder="e.g. 1.1.49" data-i18n-ph="PH_VERSION" maxlength="12" class="awg-modal-input" aria-label="Version to install" data-i18n-aria="ARIA_VERSION_TO_INSTALL" style="width:100px; display:none;">
-            <input type="file" id="awg_ipk_file" accept=".ipk" aria-label=".ipk file to install" data-i18n-aria="ARIA_IPK_FILE" style="display:none; color:#e0e0e0; max-width:100%;">
             <input type="button" id="awg_install_btn" class="button_gen" value="Install" data-i18n-val="BTN_INSTALL" onclick="installUpdate();">
         </div>
-        <div id="awg_manual_progress" style="display:none; padding:0 18px 12px;">
-            <div style="height:10px; background:#1c2226; border:1px solid #555; border-radius:5px; overflow:hidden;">
-                <div id="awg_manual_bar" style="height:100%; width:0%; background:#cf0a2c; transition:width 0.2s;"></div>
-            </div>
-            <div id="awg_manual_msg" style="font-size:11px; opacity:0.85; margin-top:5px;"></div>
-        </div>
+        <div id="awg_file_help" style="display:none; padding:0 18px 12px; font-size:12px; line-height:1.55;"></div>
         <div style="padding:12px 18px; border-top:1px solid #444; display:flex; align-items:center; flex-wrap:wrap; gap:8px;">
             <span id="awg_modal_status" style="font-size:12px; opacity:0.75; margin-right:auto;"></span>
             <input type="button" class="button_gen" value="Check for updates" data-i18n-val="BTN_CHECK_UPDATES" onclick="checkForUpdate();">

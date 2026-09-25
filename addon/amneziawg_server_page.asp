@@ -192,7 +192,7 @@ en: {
     MSG_PEERS_FULL: "No free addresses left in the subnet (.2–.254 are taken).",
     MSG_GEN_CONFIRM: "Generate new obfuscation parameters? All existing peers will need to re-import their configs.",
     MSG_REGEN_KEYS: "Generate a NEW server key pair? Every existing peer config becomes invalid (clients must re-import).",
-    MSG_SETTINGS_TOO_BIG: "Settings are too large to save ({0} KB — the firmware caps one save at ~50 KB): remove a peer or shorten the I1-I5 junk data. The client's settings share the same store.",
+    MSG_SETTINGS_TOO_BIG: "Settings don't fit the firmware's store: {0} of {1} bytes. Asuswrt-Merlin does not save a larger set at all (the whole save is discarded), and this budget is shared with the client's profiles and every other addon. Remove a peer or shorten the I1-I5 junk data.",
     MSG_APPLY_RESTART_HINT: "Settings are applied live where possible; subnet/key changes restart the server.",
     BAN_FIRSTRUN: "<b>Server is not configured yet.</b><br>Click «Generate» for the server keys, check the port and subnet, add a peer, then press «Apply» and «Start server».",
     BAN_WAN_PRIVATE: "<b>WAN address is private/CGNAT ({0}).</b> Peers from the internet cannot reach this router directly — you need a public IP from your ISP or a port forward (UDP {1}) on the upstream router.",
@@ -298,7 +298,7 @@ ru: {
     MSG_PEERS_FULL: "В подсети не осталось свободных адресов (.2–.254 заняты).",
     MSG_GEN_CONFIRM: "Сгенерировать новые параметры обфускации? Всем существующим пирам придётся переимпортировать конфиги.",
     MSG_REGEN_KEYS: "Сгенерировать НОВУЮ пару ключей сервера? Все существующие конфиги пиров перестанут работать (переимпорт на клиентах).",
-    MSG_SETTINGS_TOO_BIG: "Настройки слишком велики для сохранения ({0} КБ — прошивка ограничивает одно сохранение ~50 КБ): удалите пира или сократите мусорные данные I1-I5. Настройки клиента лежат в том же хранилище.",
+    MSG_SETTINGS_TOO_BIG: "Настройки не помещаются в хранилище прошивки: {0} из {1} байт. Больший набор Asuswrt-Merlin не сохраняет вообще (сохранение отбрасывается целиком), а этот лимит общий с профилями клиента и всеми другими аддонами. Удалите пира или сократите мусорные данные I1-I5.",
     MSG_APPLY_RESTART_HINT: "Настройки применяются на лету, где возможно; смена подсети/ключей перезапускает сервер.",
     BAN_FIRSTRUN: "<b>Сервер ещё не настроен.</b><br>Нажмите «Сгенерировать» для ключей сервера, проверьте порт и подсеть, добавьте пира, затем «Применить» и «Запустить сервер».",
     BAN_WAN_PRIVATE: "<b>WAN-адрес приватный/CGNAT ({0}).</b> Пиры из интернета не достучатся до роутера напрямую — нужен белый IP от провайдера или проброс порта (UDP {1}) на вышестоящем роутере.",
@@ -852,14 +852,17 @@ function saveSettings(){
     setChunked('awgs_initdata', itxt ? btoa(itxt) : '', 30);
     setChunked('awgs_peers', serializePeers(), 10);
 
-    // Whole-store size guard, same as the client page's Apply (1.5.14): this posts the ENTIRE
-    // custom_settings object and the firmware caps one request body at ~64 KB. The server side
-    // can genuinely reach it — many peers (each carrying pub/priv/psk) plus chunked I1-I5 junk,
-    // in a store shared with the client's five profiles. Without the check the firmware
-    // truncates silently and the settings come back corrupted. Refuse with a named cause.
-    var postLen = encodeURIComponent(JSON.stringify(custom_settings)).length;
-    if (postLen > 50000) {
-        alert(T('MSG_SETTINGS_TOO_BIG', Math.round(postLen / 1024)));
+    // Whole-store size guard, same as the client page's Apply: this posts the ENTIRE
+    // custom_settings object, and httpd declares amng_custom CKN_STR8192 — a JSON over 8192
+    // bytes fails nvram_check and the WHOLE save is discarded (syslog "nvram_check fail: nvram
+    // amng_custom over length"), while the service event still fires. (The ~64 KB body cap this
+    // guard used to assume was wrong — 1.5.24.) The budget is shared with the client's profiles
+    // and every other addon; peers (pub/priv/psk each) plus chunked I1-I5 junk can reach it.
+    // Refuse with a named cause instead of a silent no-save.
+    var postLen = 0;
+    try { postLen = unescape(encodeURIComponent(JSON.stringify(custom_settings))).length; } catch (e) {}
+    if (postLen > 8192) {
+        alert(T('MSG_SETTINGS_TOO_BIG', postLen, 8192));
         return;
     }
 

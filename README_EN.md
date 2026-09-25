@@ -85,7 +85,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full changelog (in Russian).
 - **Priority over Xray** -- while XRAYUI runs in "redirect all traffic" mode, devices with a **VPN: all traffic** policy or an include-mode geo policy automatically get priority into the tunnel **ahead of Xray** (an `AWG_PRIO` chain at the top of PREROUTING, since 1.3.12); the rest of the LAN — and an exclude-mode "Direct by lists" geo policy — keeps using Xray, and Xray's own rules are left untouched
 - **Self-healing** -- a post-start health check (ping/TCP/handshake through the tunnel) with auto-rollback of a dead tunnel, a 5-minute watchdog (revives a fallen tunnel, repairs rules after firewall restarts), and a deadman guard against losing the LAN
 - **Conflict warnings** -- on-page banners: co-resident DPI/proxy tools (zapret/b4), Xray/XRAYUI (a two-mode banner with a "Stop Xray" button + a peer-subnet coverage guard), the firmware's own VPN client (wgc/VPN Fusion), hardware CTF acceleration on old Broadcom (one-click "disable & reboot"), a private/CGNAT WAN address and a busy port for the server, domain Geo without DNS interception, a foreign match-all dnsmasq rule
-- **In-app updates** -- one-click check & install of new versions (via jsDelivr when GitHub is blocked), installing a specific version (rollback) and manual `.ipk` upload right from the page; the changelog is shown before updating
+- **In-app updates** -- one-click check & install of new versions (via jsDelivr when GitHub is blocked), installing a specific version (rollback); a local `.ipk` installs over SSH (`S99amneziawg install_ipk`, see «CLI management») — the firmware does not let a page upload a package; the changelog is shown before updating
 - **Diagnostics** -- a page button collects a full report for troubleshooting (platform, binaries, routing, rules, dnsmasq, geo, logs) with keys automatically redacted
 - **MSS clamping** -- automatic TCP MSS fix for tunnel traffic
 - **Auto-update** -- daily cron for geo list refresh
@@ -333,6 +333,9 @@ Output:
 
 # Install a specific version (e.g. rollback or a fix)
 /opt/etc/init.d/S99amneziawg update 1.1.50
+
+# Install a local .ipk (copy it to /tmp first: WinSCP with protocol SCP, or scp -O)
+/opt/etc/init.d/S99amneziawg install_ipk /tmp/amneziawg_1.5.24-1_aarch64-3.10.ipk
 
 # Tunnel status (the client awg0 and/or the server awgs0)
 awg show

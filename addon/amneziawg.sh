@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.5.23"
+AWG_VERSION="1.5.24"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -37,11 +37,6 @@ ANALYZE_DNS_LOG="/tmp/awg_analyze_dns.log"       # dnsmasq query log, only while
 ANALYZE_DNS_CONF="$AWG_DIR/dnsmasq_analyze.conf" # temp dnsmasq snippet enabling query logging
 ANALYZE_MAX_SECONDS=600                           # auto-stop safety cap (10 min)
 ANALYZE_MAX_ENTRIES=200                           # ring-buffer size for the on-page table
-# Manual .ipk upload (web UI): base64 text is appended here chunk-by-chunk (awgupload
-# event), then decoded + installed (awgmanualinstall). Progress/result the UI polls:
-AWG_UPLOAD_B64="/tmp/amneziawg_manual.ipk.b64"
-AWG_UPLOAD_SEQ="/tmp/.amneziawg_manual.seq"
-AWG_UPLOAD_STATUS="/www/user/awg_upload.htm"
 STARTING_FLAG="/tmp/.awg_starting"
 STOPPING_FLAG="/tmp/.awg_stopping"
 GEO_BUSY_FLAG="/tmp/.awg_geo_busy"
@@ -221,8 +216,124 @@ awg_incident(){
     fi
 }
 
+# Read one custom_settings value exactly as the FIRMWARE's own reader sees it. Merlin writes each
+# record with snprintf(line, 3040, "%s %s\n"): a key+value longer than 3037 bytes is cut at 3039
+# bytes AND LOSES ITS NEWLINE, so the NEXT key lands glued onto the same physical line. The page's
+# reader (fgets(line, 3040)) re-syncs exactly at that 3039-byte boundary and still sees the glued
+# key; a plain per-line `$1==key` never did (field 2026-09, 1.5.22: a long «Свои файлы» value
+# swallowed awg_geo_custom_urls — the page showed the URL, the router never fetched it). So split
+# every over-long physical line into 3039-byte records first, then match "key " at record start.
+# A key present twice resolves to the LAST copy, like the page (json-c: the later add replaces).
+# LC_ALL=C: byte offsets, whichever awk (busybox / Entware gawk) is first on PATH.
 get_setting(){
-    awk -v key="$1" '$1==key{sub(/^[^ ]+ /,"");print;exit}' "$SETTINGS" 2>/dev/null
+    LC_ALL=C awk -v key="$1" '
+        function hit(r) { if (index(r, key " ") == 1) { v = substr(r, length(key) + 2); f = 1 } }
+        { r = $0
+          while (length(r) > 3039) { hit(substr(r, 1, 3039)); r = substr(r, 3040) }
+          hit(r) }
+        END { if (f) print v }' "$SETTINGS" 2>/dev/null
+}
+
+# Is $2 (the value of setting $1) one the firmware cut? Two fingerprints: its writer cuts a record
+# at 3039 bytes, leaving exactly 3038-len(key) value bytes; and the pre-1.5.24 page, which could
+# only read back 2999 bytes, re-saved such a cut view re-encoded — 2999..3001 chars. (An intact
+# 3000/3001-char value is flagged too; the page itself can only show it cut, so nothing is lost
+# that the next page save wouldn't lose anyway.)
+setting_is_cut(){
+    case "${#2}" in 2999|3000|3001) return 0 ;; esac
+    [ "${#2}" -eq $((3038 - ${#1})) ]
+}
+
+# Base64-decode stdin -> stdout. Merlin's busybox is built WITHOUT the base64 applet (config_base:
+# "# CONFIG_BASE64 is not set", every branch) and a default Entware adds none — so the bare
+# `base64 -d 2>/dev/null` this script used to call decoded NOTHING on such boxes, silently:
+# GeoCustom URL sources were never fetched, pasted files never loaded, and I1-I5 never reached
+# awg0.conf (bench GT-AX6000 @ 3006.102.8: "base64: not found"). Chain: base64 -> the firmware's
+# own openssl (always shipped) -> a pure-awk decoder. Non-alphabet bytes are ignored, the stream
+# ends at its first '=' (openssl reads interior padding differently from base64/awk), and the
+# padding is then REPAIRED ("forgiving base64": a 2/3-char tail gets its '='s back, a lone
+# 1-char tail is dropped) — so a value the firmware truncated, even between its two '=', still
+# decodes every byte it holds, identically on all three. The awk path is text-only (a NUL byte may be lost on some
+# busybox builds) — every caller decodes text. Callers that decode in a pipeline or $( ) should
+# run b64d_init first in their own shell, so the probe result is inherited, not re-run per call.
+b64d_init(){
+    [ -n "$AWG_B64D" ] && return 0
+    if [ "$(echo aGk= | base64 -d 2>/dev/null)" = hi ]; then AWG_B64D=base64
+    elif [ "$(echo aGk= | openssl base64 -d -A 2>/dev/null)" = hi ]; then AWG_B64D=openssl
+    else AWG_B64D=awk; fi
+}
+b64d(){
+    b64d_init
+    LC_ALL=C awk '{ gsub(/[^A-Za-z0-9+\/=]/, ""); s = s $0 }
+        END { p = index(s, "="); if (p > 0) s = substr(s, 1, p - 1)
+              n = length(s); r = n % 4
+              if (r == 1) s = substr(s, 1, n - 1); else if (r == 2) s = s "=="; else if (r == 3) s = s "="
+              if (s != "") print s }' |
+    case "$AWG_B64D" in
+        base64)  base64 -d 2>/dev/null ;;
+        openssl) openssl base64 -d -A 2>/dev/null ;;
+        *) LC_ALL=C awk '
+            BEGIN { a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                    for (i = 0; i < 64; i++) v[substr(a, i + 1, 1)] = i }
+            { s = s $0 }
+            END { n = length(s)
+                  for (i = 1; i + 3 <= n; i += 4) {
+                      c3 = substr(s, i + 2, 1); c4 = substr(s, i + 3, 1)
+                      x = v[substr(s, i, 1)] * 262144 + v[substr(s, i + 1, 1)] * 4096 + v[c3] * 64 + v[c4]
+                      printf "%c", int(x / 65536)
+                      if (c3 != "=") printf "%c", int(x / 256) % 256
+                      if (c4 != "=") printf "%c", x % 256
+                  } }' ;;
+    esac
+}
+
+# First 16 hex of sha256("<url>\n") — the shared-pool file name of a GeoCustom URL source. Falls
+# back to the firmware's openssl where busybox has no sha256sum applet; same digest, so files
+# already downloaded under the old names keep them.
+url_key(){
+    local h
+    h=$(echo "$1" | sha256sum 2>/dev/null | awk '{print $1}')
+    [ -n "$h" ] || h=$(echo "$1" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')
+    echo "$h" | cut -c1-16
+}
+
+# Install the rewritten settings file $1 only if it holds exactly $2 lines. busybox grep/awk can
+# exit 0 after a FAILED write (ENOSPC on a full JFFS), and a blind `> tmp && mv` then installed a
+# truncated or empty custom_settings.txt — every addon's settings gone. Refuse, keep the original.
+settings_commit(){
+    local tmp="$1" want="$2" got
+    got=$(wc -l < "$tmp" 2>/dev/null)
+    if [ -n "$got" ] && [ "$got" -eq "${want:-0}" ] 2>/dev/null && mv "$tmp" "$SETTINGS" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    log_msg "WARNING: could not rewrite $SETTINGS (disk full?) — left it unchanged"
+    return 1
+}
+
+# The writers below edit custom_settings.txt by PHYSICAL line (grep -v "^key "), but get_setting
+# also sees a key the firmware glued onto an over-long line (see get_setting) — which a per-line
+# writer can never match: clear_setting was a no-op for it, and set_setting/migrate_watchdog_hosts
+# appended a second copy, so migrate_watchdog_hosts would have rewritten the file on every run,
+# i.e. every minute. Before editing, re-frame the file the way the firmware reader does: every line
+# over 3039 bytes becomes 3039-byte records, one per line. A cut value stays cut (that data never
+# reached the flash), but each glued key is a normal line again — exactly what the page already
+# sees. No rewrite at all when nothing is glued. The re-framed copy must carry every byte of the
+# original (only newlines are added) or it is not installed — see settings_commit for why.
+settings_unglue(){
+    local tmp
+    [ -f "$SETTINGS" ] || return 0
+    LC_ALL=C awk 'length($0) > 3039 { f = 1; exit } END { exit !f }' "$SETTINGS" 2>/dev/null || return 0
+    tmp="$SETTINGS.awgtmp.$$"
+    LC_ALL=C awk '{ r = $0; while (length(r) > 3039) { print substr(r, 1, 3039); r = substr(r, 3040) }
+                    if (r != "") print r }' "$SETTINGS" > "$tmp" 2>/dev/null
+    if [ -s "$tmp" ] && [ "$(tr -d '\n' < "$tmp" | wc -c)" -eq "$(tr -d '\n' < "$SETTINGS" | wc -c)" ] \
+       && mv "$tmp" "$SETTINGS" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    log_msg "WARNING: could not re-frame $SETTINGS (disk full?) — left it unchanged"
+    return 1
 }
 
 # Remove a custom-settings line. Used for one-shot keys (e.g. awg_update_version) so a
@@ -230,10 +341,11 @@ get_setting(){
 clear_setting(){
     local key="$1" tmp
     [ -f "$SETTINGS" ] || return 0
+    settings_unglue || return 1
     grep -q "^$key " "$SETTINGS" 2>/dev/null || return 0
     tmp="$SETTINGS.awgtmp.$$"
-    grep -v "^$key " "$SETTINGS" > "$tmp" 2>/dev/null && mv "$tmp" "$SETTINGS"
-    rm -f "$tmp" 2>/dev/null
+    grep -v "^$key " "$SETTINGS" > "$tmp" 2>/dev/null
+    settings_commit "$tmp" "$(grep -vc "^$key " "$SETTINGS" 2>/dev/null)"
 }
 
 # Rename one custom_settings key, carrying its value to $new (only if $new isn't already
@@ -241,15 +353,17 @@ clear_setting(){
 _awg_rename_setting(){
     local old="$1" new="$2" val tmp
     [ -f "$SETTINGS" ] || return 0
-    grep -q "^$old " "$SETTINGS" 2>/dev/null || return 0   # nothing stored under the old key
+    grep -q "$old " "$SETTINGS" 2>/dev/null || return 0     # nothing stored under the old key (glued included)
+    settings_unglue || return 1
+    grep -q "^$old " "$SETTINGS" 2>/dev/null || return 0
     if grep -q "^$new " "$SETTINGS" 2>/dev/null; then
         clear_setting "$old"                               # new key already set -> just drop the stale line
         return 0
     fi
     val=$(get_setting "$old")
     tmp="$SETTINGS.awgtmp.$$"
-    { grep -v "^$old " "$SETTINGS"; echo "$new $val"; } > "$tmp" 2>/dev/null && mv "$tmp" "$SETTINGS"
-    rm -f "$tmp" 2>/dev/null
+    { grep -v "^$old " "$SETTINGS"; echo "$new $val"; } > "$tmp" 2>/dev/null
+    settings_commit "$tmp" $(( $(grep -vc "^$old " "$SETTINGS" 2>/dev/null) + 1 ))
 }
 
 # One-time migration of the credential-flavored keys used up to 1.1.88 to neutral names.
@@ -274,9 +388,10 @@ migrate_watchdog_hosts(){
     val=$(get_setting awg_watchdog_hosts)
     case "$val" in *" "*) ;; *) return 0 ;; esac
     val=$(printf '%s' "$val" | tr -s ' ' ',')
+    settings_unglue || return 1   # a glued copy would survive the grep -v below and re-trigger this forever
     tmp="$SETTINGS.awgtmp.$$"
-    { grep -v "^awg_watchdog_hosts " "$SETTINGS"; echo "awg_watchdog_hosts $val"; } > "$tmp" 2>/dev/null && mv "$tmp" "$SETTINGS"
-    rm -f "$tmp" 2>/dev/null
+    { grep -v "^awg_watchdog_hosts " "$SETTINGS"; echo "awg_watchdog_hosts $val"; } > "$tmp" 2>/dev/null
+    settings_commit "$tmp" $(( $(grep -vc "^awg_watchdog_hosts " "$SETTINGS" 2>/dev/null) + 1 ))
 }
 
 # Write (add or replace) one custom-settings line — the backend counterpart of the page's
@@ -284,10 +399,12 @@ migrate_watchdog_hosts(){
 # profile switch). Same temp+rename shape as clear_setting; on the rare race with an httpd
 # settings POST the last writer wins — acceptable for a manual, one-shot key.
 set_setting(){
-    local key="$1" val="$2" tmp
+    local key="$1" val="$2" tmp n=0
+    settings_unglue || return 1
     tmp="$SETTINGS.awgtmp.$$"
-    { grep -v "^$key " "$SETTINGS" 2>/dev/null; echo "$key $val"; } > "$tmp" && mv "$tmp" "$SETTINGS"
-    rm -f "$tmp" 2>/dev/null
+    { grep -v "^$key " "$SETTINGS" 2>/dev/null; echo "$key $val"; } > "$tmp" 2>/dev/null
+    [ -f "$SETTINGS" ] && n=$(grep -vc "^$key " "$SETTINGS" 2>/dev/null)
+    settings_commit "$tmp" $(( ${n:-0} + 1 ))
 }
 
 # =============================================================
@@ -449,7 +566,7 @@ profile_cli_switch(){
     case "$tgt" in ''|*[!0-9]*) echo "Bad profile number: $1"; return 1 ;; esac
     { [ "$tgt" -ge 1 ] && [ "$tgt" -le "$AWG_PF_MAX" ]; } || { echo "Profile must be 1-$AWG_PF_MAX"; return 1; }
     profile_configured "$tgt" || { echo "Profile $tgt is not configured (need at least a private key + endpoint)."; return 1; }
-    set_setting awg_profile_active "$tgt"
+    set_setting awg_profile_active "$tgt" || { echo "Could not save the profile choice (JFFS full?) — nothing switched"; return 1; }
     rm -f "$PF_OVERRIDE" "$FAILOVER_STATE"
     log_msg "Switching to config profile $tgt ($(profile_name "$tgt")) [CLI]"
     do_restart switch
@@ -568,23 +685,34 @@ geo_union_geoip(){ local id; for id in $(geo_ids); do selected_geoip "$id"; done
 geo_union_antifilter(){ local id; for id in $(geo_ids); do selected_antifilter "$id"; done | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '; }
 # Union of GeoSite categories across all policies.
 geo_union_geosite(){ local id; for id in $(geo_ids); do get_setting "$(geo_key "$id" v2fly)" | tr ',' ' '; done | tr ' ' '\n' | sed 's/[^A-Za-z0-9_.-]//g' | grep -v '^$' | sort -u | tr '\n' ' '; }
+# Decoded URL list of policy <id>'s channel <kind> (inc=custom_urls, exc=exc_urls), as stored. A
+# value the firmware cut (setting_is_cut) loses its last, partial URL — fetching "https://raw.gith"
+# could only fail and then sit in the 6h back-off forever. Run b64d_init in the caller first.
+policy_urls(){
+    local k v
+    if [ "${2:-inc}" = exc ]; then k=$(geo_key "$1" exc_urls); else k=$(geo_key "$1" custom_urls); fi
+    v=$(get_setting "$k"); [ -n "$v" ] || return 0
+    if setting_is_cut "$k" "$v"; then { printf '%s' "$v" | b64d; echo; } | sed '$d'; else printf '%s' "$v" | b64d; fi
+    printf '\n'
+}
 # Union of ALL policies' URLs across both channels (custom_urls + exc_urls), decoded, one valid
 # http(s) URL per line, deduped — every URL (include or exclusion) is fetched once into the
 # shared userurl_<hash> pool.
 geo_union_urls(){
     local id
+    b64d_init
     for id in $(geo_ids); do
-        get_setting "$(geo_key "$id" custom_urls)" | base64 -d 2>/dev/null; printf '\n'
-        get_setting "$(geo_key "$id" exc_urls)" | base64 -d 2>/dev/null; printf '\n'
+        policy_urls "$id" inc
+        policy_urls "$id" exc
     done | tr ' \t\r' '\n\n\n' | grep -E '^https?://' | sort -u
 }
 # sha256[:16] keys of policy <id>'s URLs for channel <kind> (inc=custom_urls, exc=exc_urls), one
 # per line — for per-policy/per-channel load + dnsmasq enumeration.
 policy_url_keys(){
-    local id="$1" kind="${2:-inc}" key u
-    [ "$kind" = exc ] && key=exc_urls || key=custom_urls
-    get_setting "$(geo_key "$id" "$key")" | base64 -d 2>/dev/null | tr ' \t\r' '\n\n\n' | grep -E '^https?://' | while read -r u; do
-        echo "$u" | sha256sum | awk '{print $1}' | cut -c1-16
+    local id="$1" kind="${2:-inc}" u
+    b64d_init
+    policy_urls "$id" "$kind" | tr ' \t\r' '\n\n\n' | grep -E '^https?://' | while read -r u; do
+        url_key "$u"
     done
 }
 
@@ -1030,7 +1158,13 @@ fetch_with_mirrors(){
             ;;
         *) list="$url" ;;
     esac
-    for u in $list "https://ghproxy.net/$url" "https://gh-proxy.com/$url"; do
+    # The ghproxy mirrors proxy GitHub ONLY — for any other host (antifilter, a user's GeoCustom
+    # URL) they can't help, and they'd receive the user's private list URL (tokens included).
+    case "$url" in
+        https://github.com/*|https://raw.githubusercontent.com/*|https://gist.githubusercontent.com/*|https://objects.githubusercontent.com/*)
+            list="$list https://ghproxy.net/$url https://gh-proxy.com/$url" ;;
+    esac
+    for u in $list; do
         if curl -sfL $awg_bind --connect-timeout 6 --max-time "$mt" --retry 1 "$u" -o "$out" 2>/dev/null && [ -s "$out" ]; then
             return 0
         fi
@@ -1205,7 +1339,7 @@ download_geosite(){
 # the union of every policy's custom URLs).
 prune_custom_urls(){
     local sel f fkey u
-    sel=" $(geo_union_urls | while read -r u; do u=$(echo "$u" | tr -d ' \r'); [ -z "$u" ] && continue; echo "$u" | sha256sum | awk '{print $1}' | cut -c1-16; done | tr '\n' ' ') "
+    sel=" $(geo_union_urls | while read -r u; do u=$(echo "$u" | tr -d ' \r'); [ -z "$u" ] && continue; url_key "$u"; done | tr '\n' ' ') "
     for f in "$GEO_DIR"/domains/userurl_*.txt "$GEO_DIR"/geoip/userurl_*.cidr; do
         [ -f "$f" ] || continue
         fkey=$(basename "$f"); fkey=${fkey#userurl_}; fkey=${fkey%.txt}; fkey=${fkey%.cidr}
@@ -1216,8 +1350,12 @@ prune_custom_urls(){
 # Download the UNION of every policy's URL sources into the shared pool (one fetch per unique
 # URL). Each is classified into domains/userurl_<key>.txt + geoip/userurl_<key>.cidr,
 # key = first 16 hex of sha256(URL). Same URL in two policies => one download/file.
+# The download is classified into temp files first and only replaces the previous copy when it
+# yields usable entries: an HTML page (a github.com/…/blob/… link instead of the raw file, a
+# captive/error page served with HTTP 200) or a list with nothing routable used to be logged as a
+# success while it silently loaded zero entries — and it deleted the last good copy on the way.
 download_custom_urls(){
-    local urls url key tmp
+    local mode="$1" urls url key tmp prev
     urls=$(geo_union_urls)
     if [ -z "$urls" ]; then
         prune_custom_urls
@@ -1228,23 +1366,78 @@ download_custom_urls(){
         url=$(echo "$url" | tr -d ' \r')
         [ -z "$url" ] && continue
         case "$url" in http://*|https://*) ;; *) continue ;; esac
-        key=$(echo "$url" | sha256sum | awk '{print $1}' | cut -c1-16)
+        key=$(url_key "$url")
+        if [ -z "$key" ]; then
+            log_msg "Custom URL skipped: neither sha256sum nor openssl is available to name its files — $url"
+            continue
+        fi
         tmp="$GEO_DIR/.url_${key}.tmp"
+        rm -f "$tmp.d" "$tmp.c"
+        prev="No previous copy to fall back on"
+        { [ -f "$GEO_DIR/domains/userurl_${key}.txt" ] || [ -f "$GEO_DIR/geoip/userurl_${key}.cidr" ]; } && prev="Previous copy kept"
+        # "missing" (ensure_geo after an Apply): only URLs with no copy yet and not in their 6h
+        # back-off — log_url_backoff has just told the user they are paused.
+        if [ "$mode" = missing ]; then
+            [ "$prev" = "Previous copy kept" ] && continue
+            dl_recently_failed "url_${key}" && continue
+        fi
         if fetch_with_mirrors "$url" "$tmp" 60 && [ -s "$tmp" ]; then
-            rm -f "$GEO_DIR/domains/userurl_${key}.txt" "$GEO_DIR/geoip/userurl_${key}.cidr"
-            classify_user_list "$tmp" "$GEO_DIR/domains/userurl_${key}.txt" "$GEO_DIR/geoip/userurl_${key}.cidr"
-            rm -f "$(dl_fail_stamp "url_${key}")" 2>/dev/null
-            log_msg "Custom URL: $url ($key)"
+            if awk 'NR <= 30' "$tmp" | grep -qiE '<(!doctype|html|head|body)[ >]'; then
+                dl_mark_failed "url_${key}"
+                log_msg "Custom URL rejected: $url returned an HTML page, not a list — use the direct link to the raw file (for GitHub: raw.githubusercontent.com/…, not github.com/…/blob/…). $prev; retries paused for 6h ('Update now' retries at once)"
+            else
+                # shellcheck disable=SC2046
+                set -- $(classify_user_list "$tmp" "$tmp.d" "$tmp.c")
+                # Usable = IPv4 + real domains; bare whole-TLD words ($5) alone don't make a list
+                # (a plain-text "Page not found" body must not replace a good copy).
+                if [ $((${1:-0} + ${2:-0} - ${5:-0})) -gt 0 ]; then
+                    rm -f "$GEO_DIR/domains/userurl_${key}.txt" "$GEO_DIR/geoip/userurl_${key}.cidr"
+                    [ -f "$tmp.d" ] && mv "$tmp.d" "$GEO_DIR/domains/userurl_${key}.txt"
+                    [ -f "$tmp.c" ] && mv "$tmp.c" "$GEO_DIR/geoip/userurl_${key}.cidr"
+                    rm -f "$(dl_fail_stamp "url_${key}")" 2>/dev/null
+                    log_msg "Custom URL: $url ($key): $(user_list_summary "$@")"
+                else
+                    dl_mark_failed "url_${key}"
+                    log_msg "Custom URL rejected: $url has no usable entries: $(user_list_summary "$@") — expected one IPv4/CIDR or domain per line. $prev; retries paused for 6h ('Update now' retries at once)"
+                fi
+            fi
         else
             dl_mark_failed "url_${key}"
-            log_msg "Custom URL download failed: $url (won't re-try for 6h)"
+            log_msg "Custom URL download failed: $url ($(echo "$prev" | tr 'PN' 'pn'); retries paused for 6h — 'Update now' retries at once)"
         fi
-        rm -f "$tmp"
+        rm -f "$tmp" "$tmp.d" "$tmp.c"
     done
     prune_custom_urls
 }
 
+# Tell the user why an Apply did NOT (re)fetch a GeoCustom URL: a failed or rejected download is
+# negative-cached for 6h (dl_recently_failed), and until now that silence looked exactly like "the
+# URL is ignored". One line per URL that has no copy on disk and is waiting out its back-off.
+log_url_backoff(){
+    local u key f _then _left
+    for u in $(geo_union_urls); do
+        key=$(url_key "$u"); [ -n "$key" ] || continue
+        [ -f "$GEO_DIR/domains/userurl_${key}.txt" ] || [ -f "$GEO_DIR/geoip/userurl_${key}.cidr" ] && continue
+        dl_recently_failed "url_${key}" || continue
+        f=$(dl_fail_stamp "url_${key}"); _then=$(cat "$f" 2>/dev/null)
+        _left=$(( (21600 - ($(date +%s) - ${_then:-0})) / 60 ))
+        [ "$_left" -lt 0 ] && _left=0; [ "$_left" -gt 360 ] && _left=360   # clock steps (NTP) can skew it
+        log_msg "Custom URL $u: the last download failed or was rejected — retries paused for ~${_left} more min (then the next Apply retries; 'Update now' retries at once)"
+    done
+}
+
+# "120 IPv4, 3 domains[, N IPv6 skipped …][, M unrecognized skipped]" from classify_user_list's
+# counts ($1 IPv4, $2 domains, $3 IPv6, $4 unrecognized; $5 = how many of $2 are bare TLD rules).
+user_list_summary(){
+    local s="${1:-0} IPv4, ${2:-0} domains"
+    [ "${5:-0}" -gt 0 ] 2>/dev/null && s="$s (${5} of them whole-TLD rules like 'ru')"
+    [ "${3:-0}" -gt 0 ] 2>/dev/null && s="$s, ${3} IPv6 skipped (only IPv4 is routed)"
+    [ "${4:-0}" -gt 0 ] 2>/dev/null && s="$s, ${4} unrecognized entries skipped"
+    echo "$s"
+}
+
 download_all_geo(){
+    b64d_init
     mkdir -p "$GEO_DIR/geoip" "$GEO_DIR/domains" "$GEO_DIR/antifilter"
     log_msg "Downloading all geo databases..."
 
@@ -1339,34 +1532,126 @@ AWGEOF
     mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
 }
 
+# stdin (IPv4/CIDR/range entries, one or more per line) -> `ipset restore` add-lines (permanent,
+# timeout 0) into set $1, for VALID IPv4 only: octets <=255, prefix 1-32 (hash:net can't hold a
+# /0), a-b ranges with start <= end, leading zeros normalized. This is not cosmetic — `ipset
+# restore` ABORTS at the first line it can't parse and silently discards that line's whole
+# uncommitted batch plus everything after it, so one IPv6 address (a family-inet set), a /33 or a
+# 300.x in a user list used to load zero or a fraction of it (reproduced on ipset 6.34-7.24: a
+# mixed v4/v6 list like Telegram's cidr.txt loaded 0). A clean canonical line (the 150K-line
+# antifilter list on every rebuild) is fully validated by ONE regex and printed as is — split()
+# per line was 4-8x slower on the bench; everything else is tokenized (inline `#` comments,
+# spaces/tabs/commas/semicolons/pipes) and each token validated, junk skipped.
+ipv4_restore_lines(){
+    LC_ALL=C awk -v s="$1" '
+        function ip4(t,   a) {
+            if (t !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return ""
+            split(t, a, ".")
+            if (a[1] + 0 > 255 || a[2] + 0 > 255 || a[3] + 0 > 255 || a[4] + 0 > 255) return ""
+            return (a[1] + 0) "." (a[2] + 0) "." (a[3] + 0) "." (a[4] + 0)
+        }
+        function num(t,   a) { split(t, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+        function dq(n) { return int(n / 16777216) % 256 "." int(n / 65536) % 256 "." int(n / 256) % 256 "." n % 256 }
+        # An a-b range is emitted as its minimal CIDR cover (<= 62 lines, widest /1): the kernel
+        # rejects or mis-walks wide ranges in hash:net ("covers the whole address space", "Hash is
+        # full" for spans >= 2^31) and that one line aborted the whole restore.
+        function range(x, y,   lo, hi, bits, blk) {
+            lo = num(x); hi = num(y)
+            while (lo <= hi) {
+                bits = 0; blk = 1
+                while (bits < 31 && lo % (blk * 2) == 0 && lo + blk * 2 - 1 <= hi) { blk *= 2; bits++ }
+                print "add " s " " dq(lo) "/" (32 - bits) " timeout 0"
+                lo += blk
+            }
+        }
+        function emit(t,   a, p, x, y) {
+            if (t ~ /^[0-9.]+-[0-9.]+$/) {
+                split(t, a, "-"); x = ip4(a[1]); y = ip4(a[2])
+                if (x != "" && y != "" && num(x) <= num(y)) range(x, y)
+                return
+            }
+            p = split(t, a, "/"); if (p > 2) return
+            x = ip4(a[1]); if (x == "") return
+            if (p == 2) { if (a[2] !~ /^[0-9]+$/ || a[2] + 0 < 1 || a[2] + 0 > 32) return; x = x "/" (a[2] + 0) }
+            print "add " s " " x " timeout 0"
+        }
+        /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\/([1-9]|[12][0-9]|3[0-2]))?$/ {
+            print "add " s " " $0 " timeout 0"; next
+        }
+        {
+            gsub(/\r/, ""); sub(/#.*/, "")
+            n = split($0, t, /[ \t,;|]+/)
+            for (i = 1; i <= n; i++)
+                if (t[i] ~ /^[0-9][0-9.\/-]*$/) emit(t[i])
+        }'
+}
+
 # Bulk-load CIDR file into ipset using restore (much faster than individual adds)
 ipset_load_file(){
     local file="$1"
     local setname="$2"
     [ ! -f "$file" ] && return
-    awk -v s="$setname" '
-        /^[0-9]/ && !/^#/ {
-            gsub(/[[:space:]\r]/, "")
-            if ($0 != "") print "add " s " " $0 " timeout 0"
-        }
-    ' "$file" | ipset restore -! 2>/dev/null
+    ipv4_restore_lines "$setname" < "$file" | ipset restore -! 2>/dev/null
 }
 
-# Split a user-supplied list (GeoCustom pasted file or downloaded URL) into a domains file and
-# a CIDR file, auto-detecting each line: IPv4/CIDR or IPv6 -> cidr_out; a bare domain -> dom_out;
-# blank lines, #comments and anything else are dropped. A bare IPv4 (no slash) goes to cidr_out,
-# so it never lands in dnsmasq as a useless pseudo-domain.
+# Split a user-supplied list (GeoCustom pasted file or downloaded URL) into a domains file and an
+# IPv4 file (CIDRs and a-b ranges), tolerating what real-world lists contain: CRLF, a UTF-8 BOM,
+# comments (`#` anywhere; `;`, `//`, `!` at line start), several entries per line (space/tab/
+# comma/semicolon/pipe separated), quotes and [ ] { } (JSON arrays), v2fly `domain:`/`full:`
+# prefixes, pasted URLs (reduced to their host: scheme, user@, :port, path dropped), `*.`/`+.`/
+# leading-dot wildcards, ip:port. Only VALID IPv4 reaches cidr_out (see ipv4_restore_lines for
+# why that matters); IPv6 is counted and skipped (the geo sets are family inet). A domain needs a
+# dot and a letter in its last label, labels <=63 and names <=253 chars (a longer one fails
+# `dnsmasq --test`, which drops ALL domain routing for that round). A bare single label is taken
+# as a whole-TLD rule ("ru", "xn--p1ai") ONLY when it is the line's sole entry: a word next to data
+# ("91.108.4.0/22,RU", "Hetzner Online GmbH", a "Page not found" body) must never become
+# `ipset=/ru/` — that routes an entire TLD. Such TLD rules are counted separately so a download
+# consisting only of them doesn't pass as a usable list. Output files are created only when
+# non-empty. Echoes "<IPv4> <domains> <IPv6> <unrecognized> <single-label domains>".
 classify_user_list(){
     local infile="$1" dom_out="$2" cidr_out="$3"
-    [ -f "$infile" ] || return 0
-    awk -v dout="$dom_out" -v cout="$cidr_out" '
-        { gsub(/[ \t\r]/, "") }
-        $0 == "" { next }
-        /^#/ { next }
-        /:/ { print > cout; next }
-        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ { print > cout; next }
-        /^\.?[a-zA-Z0-9._-]+$/ { sub(/^\./, ""); print > dout; next }
-    ' "$infile"
+    [ -f "$infile" ] || { echo "0 0 0 0 0"; return 0; }
+    LC_ALL=C awk -v dout="$dom_out" -v cout="$cidr_out" -v bom="$(printf '\357\273\277')" '
+        function v4ok(t,   a, p) {
+            p = split(t, a, /[.\/]/)
+            if (p < 4 || p > 5 || t !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) return 0
+            if (a[1] + 0 > 255 || a[2] + 0 > 255 || a[3] + 0 > 255 || a[4] + 0 > 255) return 0
+            if (p == 5 && (a[5] + 0 < 1 || a[5] + 0 > 32)) return 0
+            return 1
+        }
+        function num(t,   a) { split(t, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+        NR == 1 && index($0, bom) == 1 { $0 = substr($0, length(bom) + 1) }
+        {
+            gsub(/\r/, ""); sub(/#.*/, ""); sub(/^[ \t]*(;|\/\/|!).*/, "")
+            n = split($0, tok, /[ \t,;|]+/); nt = 0
+            for (i = 1; i <= n; i++) if (tok[i] != "") nt++
+            for (i = 1; i <= n; i++) {
+                t = tolower(tok[i]); q = (t ~ /["'\''`]/ || index(t, "[") || index(t, "]") || index(t, "{") || index(t, "}"))
+                gsub(/["'\''`]/, "", t)
+                gsub(/\[/, "", t); gsub(/\]/, "", t); gsub(/\{/, "", t); gsub(/\}/, "", t)
+                if (t == "") continue
+                if (t ~ /^(domain|full):/) sub(/^(domain|full):/, "", t)
+                else if (t ~ /^(regexp|keyword|include|geosite|geoip|ext):/) { nbad++; continue }
+                else if (t ~ /^[a-z][a-z0-9+.-]*:\/\//) {
+                    sub(/^[a-z][a-z0-9+.-]*:\/\//, "", t); sub(/[\/?#].*$/, "", t); sub(/^.*@/, "", t)
+                }
+                if (t ~ /^[^:]+:[0-9]+$/) sub(/:[0-9]+$/, "", t)
+                if (t ~ /^[0-9.]+-[0-9.]+$/) {
+                    split(t, rg, "-")
+                    if (v4ok(rg[1]) && v4ok(rg[2]) && num(rg[1]) <= num(rg[2])) { print t > cout; nv4++ } else nbad++
+                    continue
+                }
+                if (t ~ /^[0-9.\/]+$/) { if (v4ok(t)) { print t > cout; nv4++ } else nbad++; continue }
+                if (t ~ /:/) { if (t ~ /^[0-9a-f:.\/]+$/ && t ~ /:.*:/) nv6++; else nbad++; continue }
+                sub(/^(\*|\+)?\./, "", t); sub(/\.$/, "", t)
+                if (length(t) > 253 || t ~ /[^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.][^.]/) { nbad++; continue }
+                lab = t; sub(/^.*\./, "", lab)
+                if (t ~ /^[a-z0-9_-]+(\.[a-z0-9_-]+)+$/ && lab ~ /[a-z]/) { print t > dout; ndom++ }
+                else if (nt == 1 && !q && (t ~ /^[a-z][a-z]+$/ || t ~ /^xn--[a-z0-9-]+$/)) { print t > dout; ndom++; ntld++ }
+                else nbad++
+            }
+        }
+        END { printf "%d %d %d %d %d\n", nv4, ndom, nv6, nbad, ntld }' "$infile"
 }
 
 # Regenerate policy <id>'s pasted-file lists for channel <kind> (inc=custom_files [include],
@@ -1381,17 +1666,41 @@ apply_custom_geo(){
     local blob
     blob=$(get_setting "$(geo_key "$id" "$key")")
     [ -z "$blob" ] && return 0
+    b64d_init
     mkdir -p "$GEO_DIR/domains" "$GEO_DIR/geoip"
-    local oldifs="$IFS" entry name b64 tmp base n seen=" "
-    IFS=';'
-    set -f
-    for entry in $blob; do
+    # A cut value (setting_is_cut: the firmware's own truncation fingerprints) lost the tail of its
+    # LAST file, usually mid-line (the page now refuses to save over 2900). That half-line must not
+    # load: a /24 cut to "/2" is a VALID CIDR routing a quarter of IPv4. If the cut fell inside the
+    # NEXT file's name, that whole file is gone — say so instead of skipping it silently.
+    local trunc=0 chan="" prev="" tailcut=0
+    setting_is_cut "$(geo_key "$id" "$key")" "$blob" && trunc=1
+    # Cut exactly after a ';' — the last file is intact and the NEXT one is gone entirely (IFS
+    # splitting drops the trailing empty field, so it must not be mistaken for a cut last file).
+    [ "$trunc" = 1 ] && case "$blob" in *';'|*'=') tailcut=1; trunc=0 ;; esac
+    [ "$kind" = exc ] && chan=", exclusions"
+    local oldifs="$IFS" entry name b64 tmp base n seen=" " idx=0 last=0 cnt
+    IFS=';'; set -f
+    # shellcheck disable=SC2086
+    set -- $blob
+    set +f; IFS="$oldifs"
+    for entry in "$@"; do idx=$((idx + 1)); [ -n "$entry" ] && last=$idx; done
+    idx=0
+    for entry in "$@"; do
+        idx=$((idx + 1))
         [ -z "$entry" ] && continue
-        case "$entry" in *,*) ;; *) continue ;; esac   # need a name,content pair
         name=${entry%%,*}
         b64=${entry#*,}
-        name=$(echo "$name" | sed 's/[^a-zA-Z0-9]/_/g')
-        [ -z "$name" ] && continue
+        case "$entry" in *,*) ;; *) name="" ;; esac   # need a name,content pair
+        # Sanitized AND capped: the name becomes part of file names (.uc_<pfx><name>.tmp, ...), and
+        # a very long one exceeded NAME_MAX, so the file silently failed to load.
+        name=$(echo "$name" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-48)
+        if [ -z "$name" ]; then
+            if [ "$trunc" = 1 ] && [ "$idx" = "$last" ]; then
+                local _after="the start"; [ -n "$prev" ] && _after="file '$prev'"
+                log_msg "WARNING: GeoCustom files (policy $id$chan): the firmware settings store (~3000 chars per value, about 2 KB of list) cut off everything after $_after — a file after it was lost entirely. Re-add it smaller, or put a big list online and add it under URL sources"
+            fi
+            continue
+        fi
         # Uniquify on sanitized-name collision (e.g. "my.list" and "my-list" both -> "my_list"),
         # else the second file's classify output would truncate/overwrite the first's — data loss.
         base="$name"; n=1
@@ -1400,12 +1709,26 @@ apply_custom_geo(){
         done
         seen="$seen$name "
         tmp="$GEO_DIR/.uc_${pfx}${name}.tmp"
-        echo "$b64" | base64 -d 2>/dev/null > "$tmp"
-        [ -s "$tmp" ] && classify_user_list "$tmp" "$GEO_DIR/domains/${pfx}${name}.txt" "$GEO_DIR/geoip/${pfx}${name}.cidr"
+        printf '%s' "$b64" | b64d > "$tmp"
+        if [ "$trunc" = 1 ] && [ "$idx" = "$last" ]; then
+            # Only a PARTIAL last line goes (echo first: a complete newline-terminated line stays).
+            { cat "$tmp"; echo; } | sed '$d' > "$tmp.t" 2>/dev/null && mv "$tmp.t" "$tmp"
+            if [ -s "$tmp" ]; then
+                log_msg "WARNING: GeoCustom file '$name' (policy $id$chan) was cut off by the firmware settings store (~3000 chars per value, about 2 KB of list) — only its first part loads, the partial last line is dropped. Shrink it, or put a big list online and add it under URL sources"
+            else
+                log_msg "WARNING: GeoCustom file '$name' (policy $id$chan) was lost to the firmware settings store's cut (~3000 chars per value, about 2 KB of list) — nothing of it survived. Re-add it smaller, or put a big list online and add it under URL sources"
+            fi
+        fi
+        if [ -s "$tmp" ]; then
+            cnt=$(classify_user_list "$tmp" "$GEO_DIR/domains/${pfx}${name}.txt" "$GEO_DIR/geoip/${pfx}${name}.cidr")
+            # shellcheck disable=SC2086
+            log_msg "GeoCustom file '$name' (policy $id$chan): $(user_list_summary $cnt)"
+        fi
         rm -f "$tmp"
+        prev="$name"
     done
-    set +f
-    IFS="$oldifs"
+    [ "$tailcut" = 1 ] && log_msg "WARNING: GeoCustom files (policy $id$chan): the firmware settings store (~3000 chars per value, about 2 KB of list) cut off everything after file '$prev' — a file after it was lost entirely. Re-add it smaller, or put a big list online and add it under URL sources"
+    return 0
 }
 
 # Extract the UNION of every policy's GeoSite categories from the shared v2fly DB into shared
@@ -1503,7 +1826,7 @@ geo_any_pending(){
 geo_urls_missing(){
     local u key
     for u in $(geo_union_urls); do
-        key=$(echo "$u" | sha256sum | awk '{print $1}' | cut -c1-16)
+        key=$(url_key "$u"); [ -n "$key" ] || continue
         { [ ! -f "$GEO_DIR/domains/userurl_${key}.txt" ] && [ ! -f "$GEO_DIR/geoip/userurl_${key}.cidr" ]; } \
             && ! dl_recently_failed "url_${key}" && return 0
     done
@@ -1533,7 +1856,7 @@ geo_fetch_missing(){
         download_antifilter_list "$af_key" || log_msg "WARNING: Antifilter $af_key failed (won't re-try for 6h)"
         update_status
     done
-    geo_urls_missing && download_custom_urls
+    geo_urls_missing && download_custom_urls missing
 }
 
 # --- Unified firewall setup ---
@@ -2691,6 +3014,7 @@ cleanup_xray_priority(){
 }
 
 setup_firewall(){
+    b64d_init   # once here, so every $(geo_union_urls)/$(policy_url_keys) below inherits the probe
     # HOT-APPLY (1.4.5): no cleanup_firewall here anymore. The old teardown-then-rebuild left
     # the LAN unmarked + the sets empty for the whole rebuild (~17-21 s on a loaded armv7 —
     # every Apply looked like a VPN reconnect AND leaked geo devices to the WAN past the
@@ -2797,8 +3121,7 @@ setup_firewall(){
         done
         # Custom IPs (field) -> permanent entries, batched through ONE `ipset restore` (the old
         # per-IP `ipset add` loop forked a process per entry — 100+ execs on big fields).
-        get_setting "$(geo_key "$gid" custom_ips)" | tr ',' '\n' | awk -v s="$_ldt" '
-            { gsub(/[ \r]/, ""); if ($0 != "") print "add " s " " $0 " timeout 0" }' \
+        get_setting "$(geo_key "$gid" custom_ips)" | tr ',' '\n' | ipv4_restore_lines "$_ldt" \
             | ipset restore -! 2>/dev/null
         # GeoCustom pasted files (per-policy content): regenerate, then load this policy's CIDRs.
         apply_custom_geo "$gid"
@@ -2842,8 +3165,7 @@ setup_firewall(){
                 fi
             fi
             if [ -n "$_exldt" ]; then
-                get_setting "$(geo_key "$gid" exc_ips)" | tr ',' '\n' | awk -v s="$_exldt" '
-                    { gsub(/[ \r]/, ""); if ($0 != "") print "add " s " " $0 " timeout 0" }' \
+                get_setting "$(geo_key "$gid" exc_ips)" | tr ',' '\n' | ipv4_restore_lines "$_exldt" \
                     | ipset restore -! 2>/dev/null
                 for _f in "$GEO_DIR"/geoip/excustom_p${gid}_*.cidr; do
                     [ -f "$_f" ] && ipset_load_file "$_f" "$_exldt"
@@ -3426,6 +3748,7 @@ geo_in_use(){
 # Runs in the background so Apply/Force Apply/update return promptly; the log shows
 # progress and setup_firewall is re-applied afterwards.
 ensure_geo(){
+    b64d_init   # inherited by the $( ) subshells and the background download below
     # Sync the shared pool to the UNION of all policies' selections (drop de-selected files),
     # and GC sets/files of deleted policies.
     prune_geoip
@@ -3433,6 +3756,7 @@ ensure_geo(){
     prune_custom_urls
     prune_orphan_policies
     geo_in_use || return 0
+    log_url_backoff
     # Collect ONLY what's missing across the union — adding one GeoIP service to one tab
     # shouldn't re-fetch the others or the big shared v2fly DB.
     local need=0 need_yml=0
@@ -3794,7 +4118,10 @@ generate_config(){
     done
     if [ -n "$initdata" ]; then
         local decoded
-        decoded=$(echo "$initdata" | base64 -d 2>/dev/null)
+        # b64d, not a bare `base64 -d`: stock Merlin has no base64 applet, and there the I-params
+        # silently never reached awg0.conf at all (tunnel up, DPI camouflage absent).
+        b64d_init
+        decoded=$(echo "$initdata" | b64d)
         i1=$(echo "$decoded" | awk '/^I1 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
         i2=$(echo "$decoded" | awk '/^I2 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
         i3=$(echo "$decoded" | awk '/^I3 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
@@ -4061,9 +4388,11 @@ do_diag(){
     echo "entware coreutils    : $([ "$AWG_PATH_SANE" = 0 ] && echo 'firmware busybox in use — /opt grep/sed/awk failed the addon self-test. The addon works FULLY this way; often just a lib-path/env quirk in the addon minimal env, NOT necessarily a bad USB. If /opt/bin/grep --version works over SSH, ignore it; suspect the Entware install/USB only if it also crashes in SSH. See the /opt/bin/grep probe below.' || echo 'OK')"
     echo "inherited LD_LIBRARY_PATH (httpd) : ${AWG_ORIG_LD_LIBRARY_PATH:-(empty — good)}"
     echo "PATH                 : $PATH"
-    for _t in grep sed awk sort md5sum curl; do
+    for _t in grep sed awk sort md5sum sha256sum base64 openssl curl; do
         echo "  which $_t : $(which "$_t" 2>/dev/null || echo '(not found)')"
     done
+    b64d_init
+    echo "  base64 decoder  : $AWG_B64D   (base64 applet absent on stock Merlin -> openssl/awk fallback; GeoCustom URLs/files + I1-I5 depend on it)"
     echo "  grep functional : $([ "$(echo probe 2>/dev/null | grep -c probe 2>/dev/null)" = "1" ] && echo yes || echo 'NO (segfault/broken!)')"
     echo "  sed functional  : $([ "$(echo probe 2>/dev/null | sed -n 's/probe/ok/p' 2>/dev/null)" = "ok" ] && echo yes || echo 'NO (broken!)')"
     echo "  awk functional  : $([ "$(echo probe 2>/dev/null | awk '{print "ok"}' 2>/dev/null)" = "ok" ] && echo yes || echo 'NO (broken!)')"
@@ -4247,7 +4576,26 @@ do_diag(){
         # matches none of the generic /priv/ /psk/ /preshar/ /secret/ globs — note /psk/ does NOT
         # match "hpk". Neutral field names come from migrate_field_names: iface_p1 = interface
         # private key, peer_p2 = peer preshared key.
-        grep '^awg_' "$SETTINGS" 2>/dev/null | awk '{k=$1; if(k ~ /^awg_(pf[0-9]+_)?iface_p1/||k ~ /^awg_(pf[0-9]+_)?peer_p2/||k ~ /^awg_(pf[0-9]+_)?hpk/||k ~ /priv/||k ~ /psk/||k ~ /preshar/||k ~ /secret/){print k" <redacted>"}else{print}}' | head -120 | sed 's/^/  /'
+        # Records are split exactly like get_setting (the firmware glues the NEXT key onto an
+        # over-long line — a glued private key used to print in clear under the previous key's
+        # name), and long blobs (file/initdata base64) are shortened to their length: noise in a
+        # pasted diag.
+        LC_ALL=C awk '
+            function emit(r,   k, v) {
+                k = r; sub(/ .*/, "", k)
+                if (k !~ /^awg_/) return
+                if (++shown > 120) { more++; return }   # capped HERE, so the glued note below always prints
+                if (k ~ /^awg_(pf[0-9]+_)?iface_p1/ || k ~ /^awg_(pf[0-9]+_)?peer_p2/ || k ~ /^awg_(pf[0-9]+_)?hpk/ || k ~ /priv/ || k ~ /psk/ || k ~ /preshar/ || k ~ /secret/) { print k " <redacted>"; return }
+                v = (index(r, " ") ? substr(r, index(r, " ") + 1) : "")
+                if (length(v) > 160) v = substr(v, 1, 48) "...(" length(v) " chars)"
+                print k " " v
+            }
+            { r = $0
+              if (length(r) > 3039) glued = glued " " NR
+              while (length(r) > 3039) { emit(substr(r, 1, 3039)); r = substr(r, 3040) }
+              emit(r) }
+            END { if (more) print "... (" more " more awg_ keys not shown)"
+                  if (glued != "") print "!! custom_settings line(s)" glued ": a record overflowed the firmware 3039-byte cap and the next key got glued onto it" }' "$SETTINGS" 2>/dev/null | sed 's/^/  /'
     else echo "  (no $SETTINGS)"; fi
     echo "--- awg show (live UAPI state, secrets redacted) ---"
     # Through redact_secrets: an AmneziaWG 3.0 daemon makes `awg show` print the header protection
@@ -5743,7 +6091,10 @@ EOF
         fi
     fi
 
-    log_text=$(grep "amneziawg" /tmp/syslog.log 2>/dev/null | tail -20 | sed 's/"/\\"/g' | tr '\n' '|' | sed 's/|/\\n/g')
+    # JSON-escape: backslash FIRST, then quotes; tabs -> spaces and other control bytes dropped. A
+    # lone backslash (a pasted Windows path in a log line) or a raw tab made awg_status.htm invalid
+    # JSON and the page showed the router as offline until that line scrolled out of the tail.
+    log_text=$(grep "amneziawg" /tmp/syslog.log 2>/dev/null | tail -20 | tr '\t' ' ' | tr -d '\000-\010\013-\037' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|' | sed 's/|/\\n/g')
 
     # "Daemon up but the tunnel isn't established" flag for the UI. True only while running and NO
     # peer has EVER completed a handshake (peer_hs_max==0 → endpoint unreachable / obfuscation
@@ -6955,8 +7306,8 @@ check_update(){
 }
 
 # Install a ready .ipk at $1 (human label $2, e.g. "v1.2.3" or "uploaded package").
-# Shared by do_update (after a verified download) and do_manual_install (after a
-# verified upload). Preserves geo lists across the opkg upgrade, stops the VPN, installs,
+# Shared by do_update (after a verified download) and do_install_ipk (after a
+# verified local package). Preserves geo lists across the opkg upgrade, stops the VPN, installs,
 # restores geo, re-installs the web page from the new version and refreshes status.
 finalize_ipk_install(){
     local tmp="$1" label="$2"
@@ -7113,80 +7464,55 @@ finalize_ipk_install(){
     return 0
 }
 
-# Manual install: assemble a base64-encoded .ipk uploaded chunk-by-chunk from the web UI
-# (see the awgupload service event), verify it, and install it. The browser cannot POST a
-# multi-MB binary through the firmware's apply path (httpd caps it and is line-oriented),
-# so the file arrives as base64 text appended to AWG_UPLOAD_B64; here we decode it once,
-# check the exact byte length the browser reported, validate the gzip CRC (an .ipk is a
-# tar.gz, so a corrupt/truncated upload fails this) and the opkg .ipk structure, then
-# hand off to finalize_ipk_install. Progress/result is written to AWG_UPLOAD_STATUS for
-# the UI to poll. Nothing is installed unless every check passes.
-do_manual_install(){
-    local b64="$AWG_UPLOAD_B64" tmp="/tmp/amneziawg_manual.ipk"
-    local want_len got_len tok
-    # Read the upload token BEFORE clearing the one-shot keys, and stamp it on every final
-    # status line (awg_man_status). The UI matches on this token, so a stale poller from a
-    # previous/aborted upload can never act on another run's result.
-    tok=$(get_setting awg_ipk_token)
-    tok=$(printf '%s' "$tok" | tr -cd 'A-Za-z0-9_-')
-    want_len=$(get_setting awg_ipk_len)
-    # One-shot keys: clear now so a stale chunk/length can never affect a later operation.
-    clear_setting awg_ipk_len
-    clear_setting awg_ipk_chunk
-    clear_setting awg_ipk_seq
-    clear_setting awg_ipk_first
-    clear_setting awg_ipk_token
-    rm -f "$AWG_UPLOAD_SEQ"
-    case "$want_len" in *[!0-9]*) want_len="" ;; esac
-
+# Install a local .ipk that the user copied to the router over SSH (WinSCP / scp -O) — CLI
+# `amneziawg.sh install_ipk <file>`, also `S99amneziawg install_ipk <file>`. This replaces the
+# web UI's "upload a file" mode (1.1.52-1.5.23), which could NEVER work on Asuswrt-Merlin: httpd
+# declares amng_custom CKN_STR8192 and discards a larger settings POST whole (nvram_check), and
+# each upload chunk was ~45 KB — so the very first one vanished and the router answered "bad seq".
+# At the firmware's real limits (<=2900 chars per value, <=8192 bytes per whole-store POST) a
+# 2-3 MB package would need ~1000 round trips, each rewriting custom_settings.txt on the JFFS
+# flash — not a transport worth keeping. Same safety as before: the whole gzip stream is
+# decompressed (trailing CRC32/length verified, so a truncated/corrupt copy is caught BEFORE opkg
+# is touched), it must be an opkg package (control.tar.gz member), and it goes through the same
+# install core as the in-app update (finalize_ipk_install: geo lists preserved, watchdog stood
+# down, page re-installed). Works on a private copy (finalize removes its input), so the user's
+# file is left where they put it. The operation log is printed to the terminal at the end.
+do_install_ipk(){
+    local src="$1" tmp="/tmp/.awg_install_ipk.$$" sz rc=0 err
+    if [ -z "$src" ] || [ ! -f "$src" ] || [ ! -s "$src" ]; then
+        echo "Usage: /opt/etc/init.d/S99amneziawg install_ipk /tmp/<package>.ipk"
+        echo "  Copy the package to the router first: WinSCP (file protocol SCP), or"
+        echo "  scp -O <package>.ipk <login>@<router>:/tmp/   (-O = legacy SCP, the router has no SFTP; drop -O if your scp rejects it)"
+        [ -n "$src" ] && echo "  ERROR: '$src' is not a file or is empty."
+        return 1
+    fi
+    # The install stops the VPN (and a running AWG server): an SSH session carried by it drops, and
+    # the SIGHUP must not kill opkg halfway through replacing the binaries.
+    trap '' HUP
     ui_log_reset
-    log_msg "Manual install: assembling uploaded package"
-    if [ ! -s "$b64" ]; then
-        log_msg "Manual install: ERROR no upload data received"
-        echo "{\"status\":\"install_err\",\"tok\":\"$tok\",\"code\":\"no_data\"}" > "$AWG_UPLOAD_STATUS"
-        rm -f "$b64"; update_status; return 1
+    echo "Installing $src — this stops the VPN for a moment; progress is also shown in the web UI log."
+    log_msg "Manual install: checking $src"
+    rm -f "$tmp"
+    if ! err=$(cp "$src" "$tmp" 2>&1); then
+        rm -f "$tmp"
+        log_msg "Manual install: ERROR could not copy $src to $tmp (${err:-is /tmp full?}) — nothing changed"
+        cat "$UI_LOG" 2>/dev/null; return 1
     fi
-
-    # Decode base64 text -> binary .ipk (busybox base64 -d, openssl fallback).
-    if ! base64 -d "$b64" > "$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
-        if ! openssl base64 -d -A -in "$b64" -out "$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
-            log_msg "Manual install: ERROR base64 decode failed"
-            echo "{\"status\":\"install_err\",\"tok\":\"$tok\",\"code\":\"decode_failed\"}" > "$AWG_UPLOAD_STATUS"
-            rm -f "$b64" "$tmp"; update_status; return 1
-        fi
-    fi
-    rm -f "$b64"
-
-    got_len=$(wc -c < "$tmp" 2>/dev/null)
-    if [ -n "$want_len" ] && [ "$got_len" != "$want_len" ]; then
-        log_msg "Manual install: ERROR size mismatch (got ${got_len}, expected ${want_len})"
-        echo "{\"status\":\"install_err\",\"tok\":\"$tok\",\"code\":\"size_mismatch\"}" > "$AWG_UPLOAD_STATUS"
-        rm -f "$tmp"; update_status; return 1
-    fi
-
-    # An .ipk is a gzip-compressed tar. Decompress the WHOLE stream (reads to EOF and
-    # verifies the trailing gzip CRC32/length), so any corruption or truncation that
-    # slipped through the upload is caught here, BEFORE we touch opkg. gzip/gunzip is
-    # always present (opkg itself needs it); try both applet spellings.
+    sz=$(wc -c < "$tmp" 2>/dev/null)
+    # gzip/gunzip is always present (opkg itself needs it); try both applet spellings.
     if ! gzip -dc "$tmp" > /dev/null 2>&1 && ! gunzip -c "$tmp" > /dev/null 2>&1; then
-        log_msg "Manual install: ERROR archive is corrupt (gzip CRC check failed)"
-        echo "{\"status\":\"install_err\",\"tok\":\"$tok\",\"code\":\"corrupt\"}" > "$AWG_UPLOAD_STATUS"
-        rm -f "$tmp"; update_status; return 1
+        log_msg "Manual install: ERROR $src is corrupt or not an .ipk (gzip check failed) — nothing changed"
+        rm -f "$tmp"; cat "$UI_LOG" 2>/dev/null; return 1
     fi
-    # Must be an opkg .ipk: a gzip tar that contains control.tar.gz (the last member, so a
-    # successful listing also proves the archive decompressed fully).
     if ! tar tzf "$tmp" 2>/dev/null | grep -q 'control\.tar\.gz'; then
-        log_msg "Manual install: ERROR not an opkg package (no control.tar.gz)"
-        echo "{\"status\":\"install_err\",\"tok\":\"$tok\",\"code\":\"not_ipk\"}" > "$AWG_UPLOAD_STATUS"
-        rm -f "$tmp"; update_status; return 1
+        log_msg "Manual install: ERROR $src is not an opkg package (no control.tar.gz) — nothing changed"
+        rm -f "$tmp"; cat "$UI_LOG" 2>/dev/null; return 1
     fi
-
-    log_msg "Manual install: package OK ($(human_size "$got_len")) — installing"
-    if finalize_ipk_install "$tmp" "uploaded package"; then
-        echo "{\"status\":\"installed\",\"tok\":\"$tok\"}" > "$AWG_UPLOAD_STATUS"
-    else
-        echo "{\"status\":\"install_err\",\"tok\":\"$tok\",\"code\":\"opkg_failed\"}" > "$AWG_UPLOAD_STATUS"
-    fi
+    log_msg "Manual install: package OK ($(human_size "$sz")) — installing"
+    finalize_ipk_install "$tmp" "local package $(basename "$src")" || rc=1
+    rm -f "$tmp" 2>/dev/null
+    cat "$UI_LOG" 2>/dev/null
+    return $rc
 }
 
 do_update(){
@@ -7429,45 +7755,8 @@ do_service_event(){
         awgstart|awgstop|awgrestart|awgswitch|awgforceapply|awgsaveconf|awgupdategeo|awgdoupdate) ui_log_reset ;;
     esac
     case "$event" in
-        # Manual upload: append one base64 chunk. Kept out of the ui_log_reset list above
-        # (it fires once per chunk — would wipe the log repeatedly). Idempotent by seq so a
-        # retried/duplicated POST never double-appends; ack is written for the UI to poll.
-        awgupload)
-            local seq first chunk tok st exp
-            seq=$(get_setting awg_ipk_seq)
-            first=$(get_setting awg_ipk_first)
-            chunk=$(get_setting awg_ipk_chunk)
-            tok=$(get_setting awg_ipk_token)
-            # Token identifies this upload run; the UI ignores acks whose token doesn't
-            # match, so a stale awg_upload.htm from a previous attempt can't be mistaken
-            # for a fresh ack. Keep only the safe charset (alnum/_/-) in the echoed JSON.
-            tok=$(printf '%s' "$tok" | tr -cd 'A-Za-z0-9_-')
-            case "$seq" in ''|*[!0-9]*)
-                echo "{\"status\":\"err\",\"tok\":\"$tok\",\"msg\":\"bad seq\"}" > "$AWG_UPLOAD_STATUS"; return ;;
-            esac
-            if [ "$first" = "1" ]; then : > "$AWG_UPLOAD_B64"; echo "-1" > "$AWG_UPLOAD_SEQ"; fi
-            st=$(cat "$AWG_UPLOAD_SEQ" 2>/dev/null)
-            case "$st" in ''|*[!0-9-]*) st="-1" ;; esac
-            exp=$((st + 1))
-            if [ "$seq" -le "$st" ]; then
-                : # duplicate -> re-ack current state, do not append again
-            elif [ "$seq" -eq "$exp" ]; then
-                # Guard the append: /tmp is a small tmpfs, and a silent short-write here
-                # would only surface much later as a confusing size mismatch. Fail fast.
-                if ! printf '%s' "$chunk" >> "$AWG_UPLOAD_B64"; then
-                    echo "{\"status\":\"err\",\"tok\":\"$tok\",\"msg\":\"write failed (disk full?)\"}" > "$AWG_UPLOAD_STATUS"
-                    return
-                fi
-                st="$seq"; echo "$st" > "$AWG_UPLOAD_SEQ"
-            else
-                echo "{\"status\":\"gap\",\"tok\":\"$tok\",\"have\":$st,\"got\":$seq}" > "$AWG_UPLOAD_STATUS"
-                return
-            fi
-            echo "{\"status\":\"ok\",\"tok\":\"$tok\",\"seq\":$st,\"bytes\":$(wc -c < "$AWG_UPLOAD_B64" 2>/dev/null)}" > "$AWG_UPLOAD_STATUS"
-            ;;
-        awgmanualinstall)
-            do_manual_install
-            ;;
+        # (awgupload / awgmanualinstall — the browser .ipk upload — are gone since 1.5.24: the
+        # firmware discards any settings POST over 8 KB, so it never worked. See do_install_ipk.)
         awgstart)       do_start ;;
         awgstop)        do_stop user ;;
         awgrestart)     do_restart ;;
@@ -7570,7 +7859,7 @@ case "$1" in
     update_geo)     update_geo_lists; do_firewall_restart; update_status ;;
     check_update)   check_update ;;
     update)         do_update "$2" ;;
-    manual_install) do_manual_install ;;
+    install_ipk)    do_install_ipk "$2" ;;
     watchdog)       do_watchdog ;;
     install_page)   do_install_page ;;
     mount_ui)       do_mount_ui ;;
@@ -7604,5 +7893,5 @@ case "$1" in
             *)           echo "Usage: $0 profile [list|<1-$AWG_PF_MAX>|next]" ;;
         esac
         ;;
-    *)              echo "Usage: $0 {start|stop|restart|status|diag|mem|profile [list|N|next]|update_geo|download_geo|install_page|uninstall}" ;;
+    *)              echo "Usage: $0 {start|stop|restart|status|diag|mem|profile [list|N|next]|update [version]|install_ipk <file.ipk>|update_geo|download_geo|install_page|uninstall}" ;;
 esac
