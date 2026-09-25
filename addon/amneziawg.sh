@@ -93,6 +93,14 @@ LOCKDIR="/tmp/.awg_lock"
 # never truncate each other's launch log or overwrite each other's exit-status file.
 DAEMON_LOG="/tmp/awg_daemon.log"
 DAEMON_RC="/tmp/awg_daemon.rc"
+# "<GOMEMLIMIT>|<pool cap>" the running daemon was ACTUALLY launched with (written by
+# launch_daemon). A recompute while the tunnel is up would count the daemon's own commit
+# against itself and quote a ceiling it never got — readers use this file instead.
+DAEMON_TUNE="/tmp/awg_daemon.tune"
+# Excerpt of the last Go crash trace (panic / fault). DAEMON_LOG is truncated on every
+# launch, and the watchdog relaunches within minutes — without this copy the traceback of
+# a crash worth reporting is gone before anyone reads the incident.
+DAEMON_CRASH="/tmp/awg_daemon.crash"
 # --- AWG server role (amneziawg_server.sh) — read-only coexistence constants ---
 # The client script needs limited visibility into the server instance: per-peer policy
 # routing (server peers are policy sources exactly like LAN devices), the mangle
@@ -4078,10 +4086,17 @@ do_diag(){
     [ -f $DAEMON_LOG ] && sed 's/^/  /' $DAEMON_LOG || echo "  (none)"
     echo "  last daemon exit (this launch): $(cat $DAEMON_RC 2>/dev/null || echo '(none — daemon still running or never exited)')"
     echo "  Go runtime tune (computed now): $(go_tune_desc)"
-    grep -qiF 'out of memory' $DAEMON_LOG 2>/dev/null && \
+    is_running && [ -r "$DAEMON_TUNE" ] && \
+        echo "  Go runtime tune (applied at launch, GOMEMLIMIT|pool cap): $(cat "$DAEMON_TUNE" 2>/dev/null)"
+    if grep -qiE 'out of memory|^fatal error: .*memory' $DAEMON_LOG 2>/dev/null; then
         echo "  >>> last daemon exit was a Go runtime OUT-OF-MEMORY: heap hit the ceiling under load (box low on RAM for this throughput) <<<"
-    grep -qE 'unexpected fault address|fatal error: fault' $DAEMON_LOG 2>/dev/null && \
-        echo "  >>> last daemon exit was a FAULT (unexpected fault address / SIGSEGV in the Go runtime): a heap page the kernel refused to back — on a squeezed box (see memory envelope below) that is the same starvation as an OOM <<<"
+    elif grep -qE '^(panic: |fatal error: |unexpected fault address)' $DAEMON_LOG 2>/dev/null; then
+        echo "  >>> last daemon exit was a Go CRASH (panic / fault), NOT an OOM: a daemon or runtime bug, or bad RAM / USB I/O errors — please report it with this diag <<<"
+    fi
+    if [ -s "$DAEMON_CRASH" ]; then
+        echo "--- last daemon CRASH trace ($DAEMON_CRASH — survives relaunches, not a reboot) ---"
+        head -n 40 "$DAEMON_CRASH" 2>/dev/null | sed 's/^/  /'
+    fi
     echo "--- runtime / network / TUN ---"
     echo "memory (free):"; free 2>/dev/null | sed 's/^/  /'
     # Free RAM is the WRONG lens under vm.overcommit_memory=2 — the budget that decides
@@ -4093,13 +4108,16 @@ do_diag(){
     _ca=$(awk '/^Committed_AS:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
     echo "vm.overcommit_memory : ${_oc:-?}$([ "${_oc:-}" = 2 ] && echo ' (STRICT accounting: the heap budget is CommitLimit - Committed_AS, NOT free RAM)')"
     echo "commit budget        : CommitLimit=${_cl:-?}MiB Committed_AS=${_ca:-?}MiB swap=$(swap_total_mib)MiB"
-    # Top consumers of the COMMIT budget (VmData), which is what the ceiling is cut from —
-    # eight lines, so a field diag answers "what is eating it" without a second round-trip.
-    # The full breakdown (RSS too, modules, Trend Micro switches) is the `mem` subcommand.
-    echo "top memory users (RSS KB / VmData KB — VmData is an upper bound, a Go daemon inflates it):"
-    awk '/^Name:/{n=$2} /^VmRSS:/{r=$2} /^VmData:/{printf "  %8d %8d  %s\n", r, $2, n}' /proc/[0-9]*/status 2>/dev/null | sort -rn | head -8
+    # Top memory users, eight lines, so a field diag answers "what is eating it" without a
+    # second round-trip. The full breakdown (modules, Trend Micro switches) is `mem`.
+    # Fed through `cat`, NOT as awk file operands: awk (busybox and gawk alike) aborts on the
+    # first operand it cannot open, and a process exiting between the glob and the read
+    # would silently truncate the list; cat skips the vanished file and goes on.
+    echo "top memory users by RSS (RSS KB / VmData KB — on pre-4.5 kernels VmData also counts reserved Go heap address space; Committed_AS above is the commit authority):"
+    cat /proc/[0-9]*/status 2>/dev/null \
+        | awk '/^Name:/{n=$2; r=0} /^VmRSS:/{r=$2} /^VmData:/{printf "  %8d %8d  %s\n", r, $2, n}' | sort -rn | head -8
     _msq=$(mem_squeeze_state)
-    [ -n "$_msq" ] && echo "  >>> MEMORY ENVELOPE AT ITS FLOOR ($_msq = state|GOMEMLIMIT MiB|pool cap|swap MiB) — the heap ceiling is pinned to the ${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB overcommit floor while the buffer-pool floor (512 x 64KB = 32MB) pins ~half of it; sustained load OOM-aborts the daemon and the watchdog restarts it (reads as 'the VPN drops now and then'). Both floors are liveness minimums — fix from the box side: swap file on the USB (amtm) and/or free RAM <<<"
+    [ -n "$_msq" ] && echo "  >>> MEMORY ENVELOPE AT ITS FLOOR ($_msq = state|GOMEMLIMIT MiB|pool cap|swap MiB) — strict overcommit leaves so little commit headroom that the daemon runs (or would start) with GOMEMLIMIT at the ${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB floor and the pool at its 512-buffer liveness floor; sustained load can OOM-abort it and the watchdog restarts it (reads as 'the VPN drops now and then'). Box-side levers: a swap file (raises CommitLimit 1:1) and/or fewer user-space memory consumers <<<"
     echo "amneziawg-go running : $(pidof amneziawg-go 2>/dev/null || echo no)"
     echo "dnsmasq running      : $(pidof dnsmasq 2>/dev/null || echo no)"
     echo "--- persistent incident log (survives reboot; last LAN-critical events) ---"
@@ -4333,20 +4351,22 @@ arm_lan_deadman(){
 #   * COMMIT BUDGET (CommitLimit - Committed_AS). Under vm.overcommit_memory=2 this — not
 #     free RAM — is what compute_go_memlimit clamps GOMEMLIMIT against, so it is what pins a
 #     box to the 64MiB floor. CommitLimit = overcommit_ratio% x MemTotal + SwapTotal, so
-#     SWAP raises it directly while freeing RAM only lowers Committed_AS a little. Kernel
-#     modules (tdts/IDPfw — the Trend Micro engine behind AiProtection, Traffic Analyzer and
-#     Adaptive QoS) cost physical RAM but do NOT appear in Committed_AS at all: unloading
-#     them frees memory without lifting the ceiling one bit.
+#     SWAP raises it 1:1, while freeing memory helps only as far as it lowers Committed_AS.
+#     Kernel-module memory (the tdts/IDPfw Trend Micro engine behind AiProtection, Traffic
+#     Analyzer and Adaptive QoS) costs physical RAM but is NOT charged to Committed_AS —
+#     the features' USER-SPACE services are. So unloading the engine alone frees RAM
+#     without lifting the ceiling; stopping the services behind it does lift it.
 #
 # Per-process numbers come from one awk pass over /proc/<pid>/status (VmData appears AFTER
-# VmRSS there, so a single forward scan has both by the time it prints). There is no
-# per-process Committed_AS in /proc, and VmData is only an UPPER BOUND on the contribution —
-# reserved-but-uncommitted address space counts in it, which the Go daemon has a lot of — so
-# the report reconciles the two totals out loud rather than implying they should match. Kernel threads have
-# neither line and drop out on their own. This is a MANUAL command, so the fork discipline
-# that governs the every-minute paths (see reap_stale_status) does not apply here.
+# VmRSS there, so a single forward scan has both by the time it prints), fed through `cat`
+# so a process that exits mid-scan can't abort awk. There is no per-process Committed_AS in
+# /proc, and VmData is not one: on pre-4.5 kernels (BCM675x 4.1) it also counts reserved
+# PROT_NONE address space — the Go daemon's heap reservation, hundreds of MB — so the report
+# reconciles the two totals out loud rather than implying they should match. Kernel threads
+# have neither line and drop out on their own. This is a MANUAL command, so the fork
+# discipline that governs the every-minute paths (see reap_stale_status) does not apply here.
 do_mem_report(){
-    local _oc _ratio _cl _ca _hr _msq
+    local _oc _ratio _cl _ca _hr _msq _need
     echo "================= AmneziaWG memory report ================="
     echo "addon version    : $AWG_VERSION"
     echo "date             : $(date)"
@@ -4358,31 +4378,43 @@ do_mem_report(){
     echo "  overcommit_memory ${_oc:-?} (ratio ${_ratio:-?})$([ "${_oc:-}" = 2 ] && echo ' — STRICT: the daemon ceiling follows CommitLimit - Committed_AS, NOT free RAM')"
     _cl=$(awk '/^CommitLimit:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
     _ca=$(awk '/^Committed_AS:/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null)
-    case "$_cl$_ca" in ''|*[!0-9]*) : ;; *) _hr=$(( _cl - _ca )); echo "  commit headroom  $(printf '%8d' $_hr) MB  (CommitLimit - Committed_AS: the pool the daemon ceiling is cut from)" ;; esac
+    # Both counters validated SEPARATELY — "$_cl$_ca" as one word would pass with one empty.
+    _hr=''
+    case "$_cl" in ''|*[!0-9]*) : ;; *) case "$_ca" in ''|*[!0-9]*) : ;; *)
+        _hr=$(( _cl - _ca )); echo "  commit headroom  $(printf '%8d' $_hr) MB  (CommitLimit - Committed_AS: the pool the daemon ceiling is cut from)" ;; esac ;; esac
     echo "--- what the addon does with that ---"
-    echo "  $(go_tune_desc)"
+    echo "  $(go_tune_desc)   [computed now]"
+    is_running && [ -r "$DAEMON_TUNE" ] && \
+        echo "  running daemon was launched with (GOMEMLIMIT|pool cap): $(cat "$DAEMON_TUNE" 2>/dev/null)"
     _msq=$(mem_squeeze_state)
     if [ -n "$_msq" ]; then
         echo "  >>> ENVELOPE AT ITS FLOOR ($_msq = state|GOMEMLIMIT MiB|pool cap|swap MiB) <<<"
-        # No clamp arithmetic duplicated here (go_tune_desc owns that) — just the input that
-        # would change, so the user can see whether swap is worth the USB writes.
-        case "$_cl$_ca" in ''|*[!0-9]*) : ;; *) echo "      a 1GB swap file would make CommitLimit ~$(( _cl + 1024 ))MB and the headroom ~$(( _hr + 1024 ))MB, which lifts the ceiling off its floor; freeing RAM only moves Committed_AS (${_ca}MB) and would have to get it under ~$(( _cl / 2 ))MB to do the same" ;; esac
+        # The clamp is (CommitLimit - Committed_AS) x COMMIT_PCT%, so the ceiling leaves the
+        # floor once the headroom exceeds FLOOR x 100 / COMMIT_PCT — print that target and
+        # both ways to reach it (swap adds to CommitLimit 1:1; the rest must come off
+        # Committed_AS), instead of a rule of thumb that only fits one box size.
+        _need=$(( AWG_GOMEMLIMIT_COMMIT_FLOOR * 100 / AWG_GOMEMLIMIT_COMMIT_PCT ))
+        if [ -n "$_hr" ] && [ "$_hr" -lt "$_need" ]; then
+            echo "      the ceiling leaves its floor once the commit headroom exceeds ~${_need}MB (now ${_hr}MB): raise CommitLimit by ~$(( _need - _hr ))MB or more (SwapTotal adds 1:1 — amtm's usual swap file is 1GB), or cut Committed_AS by as much (to under ~$(( _cl - _need ))MB). A running tunnel picks up the new ceiling on its next restart."
+        fi
     fi
-    echo "--- processes: top 20 by RSS (Data = private writable VIRTUAL size, see the caveat below) ---"
+    echo "--- processes: top 20 by RSS (Data = VmData, see the caveat below) ---"
     printf '  %8s %8s  %s\n' "RSS KB" "Data KB" "process"
-    awk '/^Name:/{n=$2} /^VmRSS:/{r=$2} /^VmData:/{printf "%8d %8d  %s\n", r, $2, n}' /proc/[0-9]*/status 2>/dev/null \
+    cat /proc/[0-9]*/status 2>/dev/null \
+        | awk '/^Name:/{n=$2; r=0} /^VmRSS:/{r=$2} /^VmData:/{printf "%8d %8d  %s\n", r, $2, n}' \
         | sort -rn | head -20 | sed 's/^/  /'
-    # VmData is an UPPER BOUND on a process's commit contribution, not the contribution
-    # itself: the Go runtime reserves a large heap-arena address range it never commits, so
-    # amneziawg-go can show hundreds of MB of Data against single-digit MB of RSS. Print the
-    # reconciliation instead of hiding it — Committed_AS is the authority, and a wide gap is
-    # normal on a box running a Go daemon, NOT a leak. (Caught by a field report, 1.5.23:
-    # sum(VmData)=689MB vs Committed_AS=253MB, all of the gap one amneziawg-go.)
-    awk -v ca="$_ca" '/^VmRSS:/{s+=$2} /^VmData:/{d+=$2; n++} END{
+    # VmData is not a process's commit contribution. On pre-4.5 kernels it also counts
+    # reserved (PROT_NONE) address space, and the Go runtime reserves a large heap-arena
+    # range it never commits, so amneziawg-go can show hundreds of MB of Data against
+    # single-digit MB of RSS. Print the reconciliation instead of hiding it — Committed_AS
+    # is the authority, and a wide gap is normal on a box running a Go daemon, NOT a leak.
+    # (Field report, 1.5.23: sum(VmData)=689MB vs Committed_AS=253MB, all of the gap one
+    # amneziawg-go.)
+    cat /proc/[0-9]*/status 2>/dev/null | awk -v ca="$_ca" '/^VmRSS:/{s+=$2} /^VmData:/{d+=$2; n++} END{
             printf "  TOTAL: RSS %.1f MB, Data %.1f MB across %d processes\n", s/1024, d/1024, n
             if (ca+0 > 0 && d/1024 > ca*1.3)
-                printf "  NB: Data totals %.1f MB against Committed_AS %d MB — the gap is address space\n      reserved but never committed (mostly the Go daemon heap arena). Committed_AS rules.\n", d/1024, ca
-        }' /proc/[0-9]*/status 2>/dev/null
+                printf "  NB: Data totals %.1f MB against Committed_AS %d MB — the gap is address space\n      reserved but never committed (older kernels count the Go heap reservation in VmData). Committed_AS rules.\n", d/1024, ca
+        }'
     # Unreclaimable slab is kernel memory no process owns and no process list can explain —
     # on Broadcom boxes the wl driver's packet pools alone run to a third of RAM. Call it out
     # so it isn't hunted for in the process table above.
@@ -4467,6 +4499,11 @@ AWG_GOMEMLIMIT_COMMIT_PCT=50  # % of (CommitLimit - Committed_AS) usable per dae
 # Lowest GOMEMLIMIT the strict-overcommit clamp may emit (MiB). Named rather than inlined
 # because mem_squeeze_state compares against it: a ceiling that LANDED on this floor means
 # the clamp ran out of budget, not that it picked a ceiling that fits.
+# NB unlike compute_pool_cap's 512-buffer floor this is NOT a liveness minimum: it came in
+# with 1.3.15 as a bare "floor 64MiB" when the pool was 1024 x 64KB = 64MB, and was not
+# re-derived when 1.5.22 halved the pool floor to 32MB. Headroom <= 64MiB puts the soft
+# limit at or above the whole budget. Re-deriving it needs a measurement on a Cortex-A7
+# box (GC CPU vs survival), so it stays until then.
 AWG_GOMEMLIMIT_COMMIT_FLOOR=64
 
 # TRUE when the box has enough RAM to run the daemon with stock Go GC
@@ -4527,13 +4564,17 @@ compute_go_memlimit(){
     # Strict-overcommit clamp (see AWG_GOMEMLIMIT_COMMIT_PCT): under vm.overcommit=2 the
     # RAM-based ceiling can vastly exceed what the box can actually commit — refit it to
     # the live commit headroom, floor 64MiB (unreadable counters => RAM ceiling stands).
+    # Readable counters with ZERO or negative headroom (Committed_AS >= CommitLimit, the
+    # most starved state there is) land on the floor too — 1.3.15-1.5.22 skipped the clamp
+    # there and handed the daemon its LOOSEST ceiling (178-448MiB) at the worst moment.
     if [ "$(awk '{print $1; exit}' /proc/sys/vm/overcommit_memory 2>/dev/null)" = "2" ]; then
         _cl_kb=$(awk '/^CommitLimit:/{print $2; exit}' /proc/meminfo 2>/dev/null)
         _ca_kb=$(awk '/^Committed_AS:/{print $2; exit}' /proc/meminfo 2>/dev/null)
         case "$_cl_kb" in ''|*[!0-9]*) _cl_kb='' ;; esac
         case "$_ca_kb" in ''|*[!0-9]*) _cl_kb='' ;; esac
-        if [ -n "$_cl_kb" ] && [ "$_cl_kb" -gt "$_ca_kb" ]; then
-            _hr_mib=$(( (_cl_kb - _ca_kb) * AWG_GOMEMLIMIT_COMMIT_PCT / 100 / 1024 ))
+        if [ -n "$_cl_kb" ]; then
+            _hr_mib=0
+            [ "$_cl_kb" -gt "$_ca_kb" ] && _hr_mib=$(( (_cl_kb - _ca_kb) * AWG_GOMEMLIMIT_COMMIT_PCT / 100 / 1024 ))
             [ "$_hr_mib" -lt "$AWG_GOMEMLIMIT_COMMIT_FLOOR" ] && _hr_mib=$AWG_GOMEMLIMIT_COMMIT_FLOOR
             [ "$_hr_mib" -lt "$_lim_mib" ] && _lim_mib=$_hr_mib
         fi
@@ -4587,43 +4628,59 @@ swap_total_mib(){
 # WHY THIS EXISTS: compute_go_memlimit's strict-overcommit clamp has a FLOOR
 # (AWG_GOMEMLIMIT_COMMIT_FLOOR = 64MiB) and compute_pool_cap has one too (512 buffers — a
 # LIVENESS minimum, see its header: three rolling consumers pre-hold a 128-buffer batch
-# each). On a box where the clamp LANDS on its floor the two floors collide: 512 x 64KB =
-# 32MB of message buffers inside a 64MiB soft ceiling, i.e. HALF the budget is pool before
-# a single packet is decrypted. A sustained inbound burst then walks straight through the
-# SOFT limit (GOMEMLIMIT never refuses an allocation) into `runtime: out of memory` rc=2 —
-# or into a heap page the kernel refuses to back, which surfaces as a SIGSEGV "unexpected
-# fault address" instead (same starvation, different death shape; see record_daemon_oom).
+# each). On a box where the clamp LANDS on its floor the two floors collide: up to 512 x
+# 64KB = 32MB of message buffers inside a 64MiB soft ceiling. A sustained inbound burst
+# then walks straight through the SOFT limit (GOMEMLIMIT never refuses an allocation) until
+# a heap-arena mmap exceeds the commit budget -> `runtime: out of memory` rc=2, the
+# watchdog restarts the daemon, and the user sees "the VPN drops every few minutes".
+# (A Go "unexpected fault address"/panic is NOT this — see record_daemon_oom.)
 #
-# 1.5.22 already scales the pool cap down for exactly this shape, but it CANNOT go below
-# 512 and the heap ceiling CANNOT go below 64MiB — so here the addon has no knob left. The
-# remaining fixes are the user's (swap raises CommitLimit and lifts the whole envelope;
-# freeing RAM lowers Committed_AS), which is why this surfaces as a status flag/banner
-# instead of yet another silent retune.
+# 1.5.22 scales the pool cap down for exactly this shape and can go no lower; the heap
+# floor is not a liveness minimum (see AWG_GOMEMLIMIT_COMMIT_FLOOR) but is not re-derived
+# yet either. The levers that work today are box-side — swap raises CommitLimit 1:1,
+# stopping user-space memory consumers lowers Committed_AS — so this surfaces as a status
+# flag/banner instead of yet another silent retune.
 #
 # Field case (RT-AX58U 512MB, 388.12_2, diag 2026-09-20): GOMEMLIMIT=64MiB + pool cap 512,
 # no swap, 392 of 512MB already in use with the tunnel DOWN (AiProtection/tdts resident) —
-# ~30 OOM aborts and 9 health-check rollbacks in a single day, plus one crash on
-# receive.go's `bufsArrs[i] = device.GetMessageBuffer()`. The user saw only "the VPN drops
-# now and then", and only while YouTube played through a geo policy (the one thing routed
-# into the tunnel, and the one workload that sustains a line-rate inbound burst).
+# ~30 OOM aborts and 9 health-check rollbacks in a single day. The user saw only "the VPN
+# drops now and then", and only while YouTube played through a geo policy (the one thing
+# routed into the tunnel, and the one workload that sustains a line-rate inbound burst).
+# After a 1GB swap file: GOMEMLIMIT ~180-190MiB, pool ~730-760 (exact figures depend on
+# MemTotal).
 #
-# State tokens: "floor" = pinned to the floor with NO swap (adding swap is the actionable
-# fix); "tight" = pinned to the floor WITH swap already present (advice becomes "free RAM",
-# not "add swap again").
+# WHICH CEILING: $1, when given, is the GOMEMLIMIT to judge (record_daemon_oom passes what
+# the dead daemon was launched with; do_start passes what it is about to launch with —
+# explicitly empty = roomy/untuned = fine). With no argument and this instance's tunnel UP
+# it judges what the running daemon was ACTUALLY launched with ($DAEMON_TUNE) — a recompute
+# would count the daemon's own commit (>= 24MB of pre-held buffers, only ratcheting up)
+# against it and claim "pinned to 64MiB" for a daemon launched at 70-96MiB — and only while
+# the live budget is STILL at the floor (swap added since => the commit wall has moved
+# away; the next restart picks up the higher ceiling, no banner needed). Tunnel down: a
+# prediction for the next start.
+#
+# State tokens: "floor" = at the floor with NO swap (adding swap is the actionable fix);
+# "tight" = at the floor WITH swap present (enlarge it, or cut other memory consumers).
 mem_squeeze_state(){
-    local _lim _mib _sw _pool
-    # Roomy boxes run stock Go GC — no ceiling to be pinned against.
-    box_is_roomy && return 0
-    # Only the strict-overcommit clamp can emit a ceiling this low (the RAM-based path
-    # clamps at 96MiB), but read the knob explicitly so a future change to that clamp
-    # can't turn this probe into a false alarm on every 256MB box.
+    local _lim _mib _sw _pool="" _live
+    # Only strict accounting has a commit floor to be pinned against (overcommit=2 is also
+    # never box_is_roomy, so that check is implied).
     [ "$(awk '{print $1; exit}' /proc/sys/vm/overcommit_memory 2>/dev/null)" = "2" ] || return 0
-    _lim=$(compute_go_memlimit)
+    if [ $# -gt 0 ]; then
+        _lim=$1
+    elif iface_exists "$IFACE" && [ -r "$DAEMON_TUNE" ]; then
+        IFS='|' read -r _lim _pool < "$DAEMON_TUNE"
+        _live=$(compute_go_memlimit)
+        _live=${_live%MiB}
+        case "$_live" in ''|*[!0-9]*) : ;; *) [ "$_live" -gt "$AWG_GOMEMLIMIT_COMMIT_FLOOR" ] && return 0 ;; esac
+    else
+        _lim=$(compute_go_memlimit)
+    fi
     case "$_lim" in *MiB) : ;; *) return 0 ;; esac
     _mib=${_lim%MiB}
     case "$_mib" in ''|*[!0-9]*) return 0 ;; esac
     [ "$_mib" -le "$AWG_GOMEMLIMIT_COMMIT_FLOOR" ] || return 0
-    _pool=$(compute_pool_cap "$_lim")
+    case "$_pool" in ''|*[!0-9]*) _pool=$(compute_pool_cap "$_lim") ;; esac
     _sw=$(swap_total_mib)
     if [ "$_sw" -gt 0 ]; then
         printf 'tight|%s|%s|%s' "$_mib" "${_pool:-1024}" "$_sw"
@@ -4672,6 +4729,9 @@ launch_daemon(){
     # floor the compiled 1024x64KB pool alone can fill). Empty on roomy boxes => env
     # untouched, compiled 1024.
     _gpool=$(compute_pool_cap "$_glim")
+    # Record what THIS launch applies (empty|empty on roomy boxes): status/diag judge the
+    # running daemon by it instead of recomputing against a budget the daemon now eats into.
+    printf '%s|%s\n' "$_glim" "$_gpool" > $DAEMON_TUNE 2>/dev/null
     # WG_PROCESS_FOREGROUND=1: without it amneziawg-go DAEMONIZES — the process we launch is
     # only a short-lived parent that forks the real daemon and exits 0 once the device is up.
     # The wrapper then recorded THAT exit ("[daemon exited rc=0]" on every successful start —
@@ -4700,47 +4760,74 @@ launch_daemon(){
 }
 
 # Called from the launch wrapper after the daemon exits: if it aborted with a Go-runtime
-# out-of-memory (heavy-load heap blowout), drop a persistent breadcrumb so the cause is
-# still visible in the diag after the watchdog restarts it and after a reboot (RAM logs
-# don't survive). Gated on the exact `out of memory` string, which ONLY the Go runtime's
-# fatal-OOM prints — an intentional kill (SIGTERM/SIGKILL on stop/restart) never matches,
-# so this can't false-fire on a normal teardown.
+# out-of-memory (heavy-load heap blowout), crashed (panic / fault, 1.5.23) or was taken by
+# the kernel oom-killer, drop a persistent breadcrumb so the cause is still visible in the
+# diag after the watchdog restarts it and after a reboot (RAM logs don't survive). Gated on
+# strings only the Go runtime's own fatal paths print — an intentional kill (SIGTERM/SIGKILL
+# on stop/restart) never matches, so this can't false-fire on a normal teardown.
+# $1 = rc, $2 = GOMEMLIMIT and $3 = pool cap this daemon was launched with.
 record_daemon_oom(){
-    # Envelope verdict (1.5.23) — appended to whichever branch fires, so the incident log
-    # says not just "it ran out of memory" but WHICH knob is already at its floor and what
-    # the user can still do about it. Empty on a box with room to breathe.
-    local _sq _adv=""
-    _sq=$(mem_squeeze_state)
-    case "${_sq%%|*}" in
-        floor) _adv=" — and this box's memory envelope is AT ITS FLOOR (strict vm.overcommit, no swap): the pool floor alone pins ~half of GOMEMLIMIT and the addon has no knob left; add a swap file on the USB (amtm) — it raises CommitLimit directly, which is what sets the ceiling here (freeing RAM barely moves it on a 512MB box)" ;;
-        tight) _adv=" — and this box's memory envelope is AT ITS FLOOR (strict vm.overcommit) even with swap present: free RAM (AiProtection / co-resident addons) or cut the load through the tunnel" ;;
-    esac
-    if grep -qiF 'out of memory' $DAEMON_LOG 2>/dev/null; then
-        # The Go runtime's OWN fatal-OOM (heap-commit refused). rc is typically 2.
-        awg_incident "amneziawg-go OOM-crashed (rc=${1:-?}) — Go heap hit its ceiling under load (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024}); box is low on RAM for this throughput${_adv}"
-    elif grep -qE 'unexpected fault address|fatal error: fault' $DAEMON_LOG 2>/dev/null; then
-        # SAME starvation, different death shape — and until 1.5.23 it was recorded as
-        # NOTHING, so a box dying this way looked like a mystery crash next to a pile of
-        # OOM incidents. The Go runtime prints "unexpected fault address" + "fatal error:
-        # fault" when a SIGSEGV lands somewhere it cannot attribute to a nil dereference;
-        # on a squeezed box that is a heap page the kernel refused to back, and the
-        # traceback points at the allocation itself (field: receive.go's
-        # `bufsArrs[i] = device.GetMessageBuffer()` — a fresh 64KB message buffer).
-        # Off a squeezed box the same string is NOT memory pressure, so don't claim it is.
-        if [ -n "$_sq" ]; then
-            awg_incident "amneziawg-go died on an unexpected fault address (rc=${1:-?}) — a heap page the kernel refused to back: the SAME memory starvation as an OOM abort, just a different death shape (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024})${_adv}"
-        else
-            awg_incident "amneziawg-go died on an unexpected fault address (rc=${1:-?}, SIGSEGV inside the Go runtime) — this box is NOT memory-squeezed (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024}), so keep /tmp/awg_daemon.log and report it"
-        fi
-    elif [ "${1:-}" = 137 ] && dmesg 2>/dev/null | grep -iE 'killed process|out of memory' | grep -qi 'amneziawg-go'; then
+    local _kind _sq _adv="" _why _sig _frame _dn="${AWG_GO##*/}"
+    # Classify FIRST, so a clean exit (the common case) costs two greps and nothing more.
+    if grep -qiE 'out of memory|^fatal error: .*memory' $DAEMON_LOG 2>/dev/null; then
+        # The Go runtime's OWN fatal-OOM (heap-commit refused). rc is typically 2. The
+        # anchored half catches its other memory throws ("runtime: cannot allocate memory",
+        # "failed to reserve page summary memory") while an ordinary ENOMEM error LINE
+        # ("…sendmsg: cannot allocate memory") can't turn a later clean stop into an OOM.
+        _kind=oom
+    elif grep -qE '^(panic: |fatal error: |unexpected fault address)' $DAEMON_LOG 2>/dev/null; then
+        # Any other Go crash: panic (nil deref, index out of range, …) or runtime fault.
+        # NOT memory pressure: strict overcommit refuses at mmap time (-> the OOM branch
+        # above) and physical exhaustion at first touch goes to the kernel OOM-killer
+        # (SIGKILL, rc=137, the branch below). "unexpected fault address" is a wild or
+        # corrupted pointer — a daemon/runtime bug, bad RAM, or (SIGBUS) an I/O error
+        # reading pages back from the USB. Recorded as nothing until 1.5.23.
+        _kind=crash
+    elif [ "${1:-}" = 137 ] && dmesg 2>/dev/null | grep -iE 'killed process|out of memory' | grep -qi "$_dn"; then
         # rc=137 = 128+SIGKILL. That's ALSO how do_stop/do_start's `kill -9` fallback exits
         # the daemon, so rc alone must NOT be trusted — only record when the kernel log shows
-        # the OOM-KILLER named amneziawg-go (a box-wide-pressure kill, a DIFFERENT OOM than the
+        # the OOM-KILLER named the daemon (a box-wide-pressure kill, a DIFFERENT OOM than the
         # Go-runtime one above and invisible in the daemon's own log). Without that corroboration
         # a plain forced teardown would false-flag an incident. This catches the failure mode
         # GOMEMLIMIT can shift residual crashes toward (per-daemon cap holds, box still starves).
-        awg_incident "amneziawg-go killed by the KERNEL oom-killer (rc=137) under box-wide memory pressure — not a Go-runtime OOM; free RAM / reduce co-resident load (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024})"
+        _kind=oomkill
+    else
+        return 0
     fi
+    # Envelope verdict (1.5.23) for the ceiling THIS daemon ran with ($2, from the launch),
+    # not a re-probe of the box after its commit was released.
+    _sq=$(mem_squeeze_state "${2:-}")
+    case "${_sq%%|*}" in
+        floor) _adv=" — it ran at the strict-overcommit floor with NO swap: a swap file on the USB (amtm) raises CommitLimit 1:1 and lifts the ceiling on the next start" ;;
+        tight) _adv=" — it ran at the strict-overcommit floor even with ${_sq##*|}MiB swap: enlarge the swap file or stop other user-space memory consumers" ;;
+    esac
+    case "$_kind" in
+        oom)
+            awg_incident "$_dn OOM-crashed (rc=${1:-?}) — Go heap hit its ceiling under load (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024}); box is low on memory for this throughput${_adv}" ;;
+        oomkill)
+            awg_incident "$_dn killed by the KERNEL oom-killer (rc=137) under box-wide memory pressure — not a Go-runtime OOM; free RAM / reduce co-resident load (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024})${_adv}" ;;
+        crash)
+            # Keep the evidence: the next launch truncates DAEMON_LOG, and the watchdog
+            # relaunches within minutes. The trace goes to $DAEMON_CRASH (RAM, until reboot;
+            # diag prints it) and its two decisive lines into the incident itself (/jffs):
+            # the [signal …] line (SIGSEGV vs SIGBUS, code, addr, pc) and the first
+            # non-runtime frame of the crashing goroutine.
+            { echo "# $_dn crash, rc=${1:-?}, $(date '+%Y-%m-%d %H:%M:%S'), GOMEMLIMIT=${2:-unset} pool=${3:-1024}"
+              awk '/^(panic: |fatal error: |unexpected fault address)/{f=1} f' $DAEMON_LOG 2>/dev/null | head -n 150
+            } > $DAEMON_CRASH 2>/dev/null
+            _why=$(awk '/^(panic: |fatal error: |unexpected fault address)/{print; exit}' $DAEMON_LOG 2>/dev/null | cut -c1-120)
+            _sig=$(awk '/^\[signal /{print; exit}' $DAEMON_LOG 2>/dev/null | cut -c1-120)
+            _frame=$(awk '
+                /^goroutine [0-9]+ /   { g = 1; fn = ""; next }
+                g && /^$/              { exit }
+                g && /^[^ \t]/         { fn = $0; next }
+                g && fn != ""          { x = fn; sub(/\([^()]*\)$/, "", x); sub(/^.*\//, "", x)
+                                         if (x !~ /^runtime\./ && x != "panic") {
+                                             f = $1; sub(/^.*\//, "", f); print x " " f; exit }
+                                         fn = "" }' $DAEMON_LOG 2>/dev/null | cut -c1-120)
+            [ -n "$_sq" ] && _adv=" (box is also at its memory floor — that explains OOM aborts, not a crash like this)" || _adv=""
+            awg_incident "$_dn CRASHED (rc=${1:-?}): ${_why:-Go crash}${_sig:+ $_sig}${_frame:+ at $_frame} — NOT an OOM: a daemon/runtime bug, bad RAM or USB I/O errors; trace in $DAEMON_CRASH until reboot — please report it with the diag (GOMEMLIMIT=${2:-unset}, pool cap ${3:-1024})${_adv}" ;;
+    esac
 }
 
 # Daemon log minus the harmless wireguard-go "kernel has first class support" banner box, so
@@ -5039,13 +5126,15 @@ do_start(){
     log_msg "ipset binary: ${AWG_IPSET_BIN:-NONE (no working ipset found — geo will be disabled)}${AWG_IPSET_LIB:+ (LD_LIBRARY_PATH=$AWG_IPSET_LIB)}"
     log_msg "Go runtime: $(go_tune_desc)"
     # The envelope can be at its floor BEFORE a single packet flows (1.5.23) — say so at
-    # start, not only in the incident log after the first crash-loop. Both floors involved
-    # are liveness minimums, so this is advice, never a refusal: the tunnel still starts.
-    local _msq
-    _msq=$(mem_squeeze_state)
+    # start, not only in the incident log after the first crash-loop. Advice, never a
+    # refusal: the tunnel still starts. Judged on the ceiling launch_daemon is about to
+    # apply (explicit arg), never on a previous launch's $DAEMON_TUNE.
+    local _msq _msf
+    _msq=$(mem_squeeze_state "$(compute_go_memlimit)")
+    _msf=${_msq#*|}   # "<GOMEMLIMIT MiB>|<pool cap>|<swap MiB>"
     case "${_msq%%|*}" in
-        floor) log_msg "  WARNING: memory envelope at its floor (GOMEMLIMIT=${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB, strict vm.overcommit, NO swap) — the buffer pool alone pins ~half of it, so sustained load (video through the tunnel) can OOM-abort the daemon and the watchdog will restart it. Fix: swap file on the USB (amtm) — it raises CommitLimit, which is what sets this ceiling." ;;
-        tight) log_msg "  WARNING: memory envelope at its floor (GOMEMLIMIT=${AWG_GOMEMLIMIT_COMMIT_FLOOR}MiB, strict vm.overcommit) even with swap — free RAM (AiProtection / co-resident addons) if the tunnel drops under load." ;;
+        floor) log_msg "  WARNING: memory envelope at its floor (GOMEMLIMIT=${_msf%%|*}MiB, pool cap $(echo "$_msf" | cut -d'|' -f2), strict vm.overcommit, NO swap) — sustained load (video through the tunnel) can OOM-abort the daemon and the watchdog will restart it. Fix: a swap file on the USB (amtm) — it raises CommitLimit 1:1, which is what sets this ceiling." ;;
+        tight) log_msg "  WARNING: memory envelope at its floor (GOMEMLIMIT=${_msf%%|*}MiB, pool cap $(echo "$_msf" | cut -d'|' -f2), strict vm.overcommit) even with ${_msf##*|}MiB swap — enlarge the swap file or stop other user-space memory consumers if the tunnel drops under load." ;;
     esac
     launch_daemon
     if ! wait_for_iface "$IFACE" 10; then
@@ -5852,15 +5941,16 @@ EOF
     local ctf_block=false
     ctf_active && ctf_block=true
 
-    # Memory envelope at its floor (see mem_squeeze_state): GOMEMLIMIT pinned to the
-    # strict-overcommit floor while the buffer-pool floor alone pins ~half of it, which
-    # OOM-aborts the daemon under sustained inbound load and reads to the user as "the VPN
-    # drops every few minutes". Both floors are liveness minimums — the addon cannot tune
-    # its way out, so the page renders the two fixes that are the user's (swap / free RAM).
+    # Memory envelope at its floor (see mem_squeeze_state): the RUNNING daemon was launched
+    # with GOMEMLIMIT on the strict-overcommit floor and the live budget is still there,
+    # which OOM-aborts it under sustained inbound load and reads to the user as "the VPN
+    # drops every few minutes". The levers are box-side (swap / fewer memory consumers), so
+    # the page renders them. Only while the tunnel runs — the banner is about the daemon in
+    # service; the prediction for a stopped tunnel lives in diag/`mem` and the start log.
     # mem_detail = "<GOMEMLIMIT MiB>|<pool cap>|<SwapTotal MiB>"; the page formats it, so
     # the numbers stay machine-readable and the wording stays bilingual.
-    local mem_squeeze="" mem_detail="" _msq
-    _msq=$(mem_squeeze_state)
+    local mem_squeeze="" mem_detail="" _msq=""
+    [ "$running" = true ] && _msq=$(mem_squeeze_state)
     if [ -n "$_msq" ]; then
         mem_squeeze=${_msq%%|*}
         mem_detail=${_msq#*|}

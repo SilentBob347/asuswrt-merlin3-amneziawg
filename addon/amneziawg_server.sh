@@ -47,6 +47,8 @@ DIAG_FILE="/www/user/awgs_diag.htm"
 LOCKDIR="/tmp/.awgs_lock"
 DAEMON_LOG="/tmp/awgs_daemon.log"
 DAEMON_RC="/tmp/awgs_daemon.rc"
+DAEMON_TUNE="/tmp/awgs_daemon.tune"
+DAEMON_CRASH="/tmp/awgs_daemon.crash"
 STARTING_FLAG="/tmp/.awgs_starting"
 STOPPING_FLAG="/tmp/.awgs_stopping"
 # The server daemon runs under its OWN process name (hardlink to the same binary): the
